@@ -172,20 +172,35 @@ repositories {
 
 ### Maven Central
 
-Configured but **not yet enabled** — it stays skipped until the repository secrets exist. Three
-things are needed first, none of which can be done from the build:
+Configured but **not yet enabled** — the Central steps stay skipped until the repository secrets
+exist. Setting it up, in order:
 
-1. A [Central Portal](https://central.sonatype.com) account, with the `space.pitchstone` namespace
-   verified by proving control of `pitchstone.space` (a DNS TXT record).
-2. A GPG key whose public half is published to a keyserver.
-3. Repository secrets: `CENTRAL_USERNAME`, `CENTRAL_PASSWORD` (a Portal *user token*, not the
-   account password), `SIGNING_KEY` (the ASCII-armoured private key), `SIGNING_PASSWORD`.
+1. **Central Portal account** at [central.sonatype.com](https://central.sonatype.com).
+2. **Verify the `space.pitchstone` namespace** by adding the TXT record the Portal gives you to
+   `pitchstone.space`, then confirming in the Portal.
+3. **A GPG key**, with its public half pushed to a keyserver — Central verifies signatures against
+   one:
+   ```
+   gpg --full-generate-key                       # RSA 4096, no expiry is fine
+   gpg --list-secret-keys --keyid-format=long    # note the key id
+   gpg --keyserver keyserver.ubuntu.com --send-keys <KEY_ID>
+   gpg --armor --export-secret-keys <KEY_ID>     # this whole block is SIGNING_KEY
+   ```
+4. **A Portal user token** (Account → Generate User Token). Central rejects the account password
+   with a 401 — it must be a token.
+5. **Repository secrets**: `CENTRAL_USERNAME` and `CENTRAL_PASSWORD` (the token's two halves),
+   `SIGNING_KEY` (the full ASCII-armoured private key) and `SIGNING_PASSWORD`.
 
-Signing turns itself on only when `SIGNING_KEY` is present, so local publishing and GitHub
-Packages releases work without a key. A Central deploy lands in a staging repository and is
-released from the Portal — uploading does not make it live.
+Then tagging stages a release. Two steps run, and both are needed: the Gradle publish uploads to
+the OSSRH-compatible staging API, and a follow-up POST transfers the deployment into the Portal —
+without it the upload succeeds but nothing ever appears at
+[central.sonatype.com/publishing](https://central.sonatype.com/publishing).
 
-To publish locally:
+The transfer deliberately uses the default `user_managed` publishing type, so the release is
+*staged* rather than pushed live. **Releasing is a manual click in the Portal**, because a version
+on Central cannot be deleted or replaced afterwards.
+
+To publish locally:To publish locally:
 
 ```
 ./gradlew publishToMavenLocal
