@@ -356,11 +356,11 @@ private fun conversationLabel(message: WhatsAppManager.Received): String? = when
 }
 
 /**
- * An attachment: its inline preview straight away, and the full file on demand.
+ * An attachment, rendered according to what it is.
  *
- * The thumbnail comes free inside the message, so something is on screen the moment it arrives —
- * a download is a network round-trip and should never be the difference between showing a photo
- * and showing nothing. Tapping fetches and decrypts the real thing, which then replaces it.
+ * Whatever the kind, any thumbnail comes free inside the message, so something is on screen the
+ * moment it arrives — a download is a network round-trip and should never be the difference
+ * between showing something and showing nothing.
  */
 @Composable
 private fun MediaBlock(
@@ -368,6 +368,23 @@ private fun MediaBlock(
     media: MediaInfo,
     onDownload: suspend (String) -> ByteArray?,
     onOpen: suspend (String, MediaInfo) -> Uri?,
+) {
+    // Exhaustive on purpose: a `when` over the enum forces a decision for every kind, so a media
+    // type added later cannot quietly fall through to the image path and fail there.
+    when (media.kind) {
+        MediaKind.IMAGE, MediaKind.STICKER -> ImageAttachment(messageId, media, onDownload)
+        // A document, a video or a voice note is a file. The useful thing to do with one is hand
+        // it to an app that understands it, not try to decode it as a bitmap.
+        MediaKind.DOCUMENT, MediaKind.VIDEO, MediaKind.AUDIO -> FileAttachment(messageId, media, onOpen)
+    }
+}
+
+/** A picture: its inline preview straight away, and the full-size file on demand. */
+@Composable
+private fun ImageAttachment(
+    messageId: String,
+    media: MediaInfo,
+    onDownload: suspend (String) -> ByteArray?,
 ) {
     var full by remember(messageId) { mutableStateOf<ImageBitmap?>(null) }
     var loading by remember(messageId) { mutableStateOf(false) }
