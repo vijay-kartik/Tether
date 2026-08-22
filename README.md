@@ -41,6 +41,18 @@ val manager = WhatsAppManager(
 setContent { WhatsAppScreen(manager) }
 ```
 
+### Staying connected
+
+A companion socket does not stay up: once it goes quiet, the server, a NAT or the carrier reaps
+it, which surfaces as a TLS `close_notify`. The SDK treats that as routine and redials — 1s
+doubling to a 60s cap, reset whenever a session was actually established, and woken early when
+connectivity returns. Nothing is required of the host; `state.status` reports what it is doing,
+and `manager.reconnect()` skips the remaining backoff if you want a manual control (the Compose
+screen shows one when disconnected).
+
+Two ends stop the loop rather than retrying: `logout()`, and the server reporting the device is
+no longer linked (`401` — someone removed it from Linked Devices), where retrying could only spin.
+
 `WhatsAppManager.Config` carries the host-tunable knobs — `databaseName`, `logTag`,
 `notificationTitle`, and `deviceName`, the name the user sees for this device in WhatsApp's
 **Linked Devices** list (default `"Tether"`). `deviceName` travels in the pairing payload only,

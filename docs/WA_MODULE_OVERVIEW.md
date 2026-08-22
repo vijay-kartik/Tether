@@ -112,6 +112,12 @@ that unmarshals each decrypted frame and routes by tag — `iq`, `success`, `mes
 pings, delivery and retry receipts, pre-key upload and top-up (a
 `<notification type="encrypt">` means the pool is running low), and logout.
 
+`WAClient.connect()` returns an `Ended` outcome — `Closed`, `Reconnect`, `Unlinked` or
+`Dropped` — rather than deciding for itself whether to come back; `WhatsAppManager.runClient()`
+owns the retry loop, so reconnects do not nest a stack frame each. Backoff is 1s doubling to 60s,
+reset whenever a session actually reached `success`, and cut short by returning connectivity or by
+`reconnect()`.
+
 `WhatsAppManager` is the public API: a `StateFlow<State>` for the UI, an `onMessages`
 suspend callback for the host, `start()` / `connect()` / `logout()` / `annotate()`, a Room
 database for keys and credentials, and `WaForegroundService` so Android does not kill the
