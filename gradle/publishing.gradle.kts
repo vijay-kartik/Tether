@@ -11,9 +11,15 @@ val artifactName: String by extra
 val pomName: String by extra
 val pomDescription: String by extra
 
-/** A gradle property if set, else the environment — CI supplies these as secrets. */
+/**
+ * A gradle property if set, else the environment — CI supplies these as secrets.
+ *
+ * Blank counts as absent. A workflow that maps an unset secret into `env` passes an empty string
+ * rather than nothing at all, and an empty signing key would otherwise look present and fail the
+ * build at the point of use.
+ */
 fun secret(property: String, environment: String): String? =
-    providers.gradleProperty(property).orNull ?: System.getenv(environment)
+    (providers.gradleProperty(property).orNull ?: System.getenv(environment))?.takeIf { it.isNotBlank() }
 
 afterEvaluate {
     configure<PublishingExtension> {
