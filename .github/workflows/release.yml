@@ -75,6 +75,28 @@ jobs:
         if: ${{ (github.event_name == 'push' || inputs.central) && env.CENTRAL_USERNAME != '' }}
         run: ./gradlew publishAllPublicationsToCentralPortalRepository --stacktrace
 
+      # Uploading to the staging API is not the whole job: a deployment only becomes visible in
+      # the Publisher Portal once it is transferred, and skipping this leaves the artifacts in
+      # staging with nothing to release and no error to notice.
+      #
+      # publishing_type is left at its default (user_managed), so this stages the release for
+      # review rather than pushing it to Central. A version on Central cannot be deleted, so the
+      # last step stays a deliberate human one.
+      - name: Transfer the deployment to the Central Portal
+        if: ${{ (github.event_name == 'push' || inputs.central) && env.CENTRAL_USERNAME != '' }}
+        run: |
+          auth=$(printf '%s:%s' "$CENTRAL_USERNAME" "$CENTRAL_PASSWORD" | base64 -w0)
+          status=$(curl -sS -o /tmp/central-transfer.txt -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $auth" \
+            "https://ossrh-staging-api.central.sonatype.com/manual/upload/defaultRepository/space.pitchstone")
+          cat /tmp/central-transfer.txt || true
+          echo
+          if [ "$status" -ge 300 ]; then
+            echo "::error::transfer to the Portal failed with HTTP $status"
+            exit 1
+          fi
+          echo "Staged. Review and release it at https://central.sonatype.com/publishing"
+
       - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
