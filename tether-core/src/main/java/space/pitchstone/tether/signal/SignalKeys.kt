@@ -8,7 +8,7 @@ import org.whispersystems.libsignal.ecc.ECKeyPair
 import org.whispersystems.libsignal.state.SignedPreKeyRecord
 
 /**
- * Adapts Kortex's raw Curve25519 [DeviceCredentials] into libsignal's key types. libsignal
+ * Adapts Tether's raw Curve25519 [DeviceCredentials] into libsignal's key types. libsignal
  * encodes public keys with a leading 0x05 "DJB" type byte; private keys are the bare 32 bytes.
  */
 internal object SignalKeys {

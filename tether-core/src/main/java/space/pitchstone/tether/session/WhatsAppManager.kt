@@ -45,6 +45,12 @@ class WhatsAppManager(
         val logTag: String = "WhatsApp",
         /** Title on the ongoing foreground-service notification. */
         val notificationTitle: String = "WhatsApp Connection",
+        /**
+         * What the user sees for this device in WhatsApp's Linked Devices list. Sent only in the
+         * pairing payload, so it is fixed when the device is linked: changing it later takes
+         * effect on the next pairing, not the next connect.
+         */
+        val deviceName: String = DEFAULT_DEVICE_NAME,
     )
 
     // Never hold the caller's Context: a host passing an Activity would have it pinned for the
@@ -244,7 +250,7 @@ class WhatsAppManager(
     }
 
     internal suspend fun runClient() {
-        val c = WAClient(credentialStore, keyValueStore, listener)
+        val c = WAClient(credentialStore, keyValueStore, listener, config.deviceName)
         client = c
         runCatching { c.connect() }.onFailure { e ->
             _state.update { it.copy(status = "Error: ${e.message}") }
@@ -305,6 +311,9 @@ class WhatsAppManager(
     }
 
     companion object {
+        /** Default Linked Devices name. Public so a host can build on it rather than retype it. */
+        const val DEFAULT_DEVICE_NAME = "Tether"
+
         private const val MAX_RECENT = 50
 
         /**

@@ -19,8 +19,14 @@ internal object ClientPayloadFactory {
     /** Current WhatsApp web client version (whatsmeow `waVersion`). */
     val WA_VERSION = intArrayOf(2, 3000, 1041871181)
 
-    /** Registration payload — used during QR pairing (passive=false, carries device keys). */
-    fun registration(credentials: DeviceCredentials): ByteArray = ClientPayload(
+    /**
+     * Registration payload — used during QR pairing (passive=false, carries device keys).
+     *
+     * [deviceName] is what the user sees for this device in WhatsApp's Linked Devices list. It
+     * travels in the registration payload only, so it is fixed at pairing time: changing it later
+     * has no effect until the device is unlinked and paired again.
+     */
+    fun registration(credentials: DeviceCredentials, deviceName: String): ByteArray = ClientPayload(
         userAgent = baseUserAgent(),
         webInfo = ClientPayload.WebInfo(webSubPlatform = ClientPayload.WebInfo.WebSubPlatform.WEB_BROWSER),
         connectType = ClientPayload.ConnectType.WIFI_UNKNOWN,
@@ -36,7 +42,7 @@ internal object ClientPayloadFactory {
             eSkeyVal = credentials.signedPreKey.keyPair.publicKey.toByteString(),
             eSkeySig = credentials.signedPreKey.signature.toByteString(),
             buildHash = versionHash().toByteString(),
-            deviceProps = deviceProps().encode().toByteString(),
+            deviceProps = deviceProps(deviceName).encode().toByteString(),
         ),
     ).encode()
 
@@ -73,8 +79,8 @@ internal object ClientPayloadFactory {
     )
 
     /** The companion device's self-description; `os` becomes the name shown in Linked Devices. */
-    private fun deviceProps() = DeviceProps(
-        os = "Kortex",
+    private fun deviceProps(deviceName: String) = DeviceProps(
+        os = deviceName,
         version = DeviceProps.AppVersion(primary = 0, secondary = 1, tertiary = 0),
         platformType = DeviceProps.PlatformType.UNKNOWN,
         requireFullSync = false,
