@@ -94,6 +94,8 @@ fun WhatsAppScreen(manager: WhatsAppManager, modifier: Modifier = Modifier, onSk
             status = state.status,
             deviceJid = state.deviceJid,
             recent = state.recent,
+            connected = state.connected,
+            onReconnect = manager::reconnect,
             onLogout = { confirmLogout = true },
         )
     } else {
@@ -108,6 +110,8 @@ private fun LinkedAccount(
     status: String,
     deviceJid: String?,
     recent: List<WhatsAppManager.Received>,
+    connected: Boolean,
+    onReconnect: () -> Unit,
     onLogout: () -> Unit,
 ) {
     Column(modifier = modifier.fillMaxSize().padding(16.dp)) {
@@ -123,6 +127,7 @@ private fun LinkedAccount(
                     Text(it, style = MaterialTheme.typography.labelSmall, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
             }
+            if (!connected) TextButton(onClick = onReconnect) { Text("Reconnect") }
             TextButton(onClick = onLogout) { Text("Log out") }
         }
 

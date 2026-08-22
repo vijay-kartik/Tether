@@ -65,7 +65,28 @@ internal class WAClient(
         /** Decrypted incoming messages (DMs/groups). */
         suspend fun onMessage(messages: List<MessageDecryptor.Result>) {}
         fun onNode(node: Node) {}
-        fun onDisconnected(cause: Throwable?) {}
+    }
+
+    /**
+     * Why a connection attempt ended. Returned rather than pushed through the listener so the
+     * decision to reconnect belongs to the caller that owns the retry loop — a client that
+     * reconnects itself from inside its own read loop nests a stack frame per attempt.
+     */
+    sealed interface Ended {
+        /** Torn down deliberately ([logout]): stay down. */
+        data object Closed : Ended
+
+        /** The server's expected disconnect right after pairing: reconnect at once. */
+        data object Reconnect : Ended
+
+        /** No longer linked (401) — the companion was removed. Retrying cannot help. */
+        data object Unlinked : Ended
+
+        /**
+         * Anything else. [wasConnected] separates a healthy session that dropped (retry promptly)
+         * from never having got in at all (back off).
+         */
+        data class Dropped(val cause: Throwable?, val wasConnected: Boolean) : Ended
     }
 
     private lateinit var credentials: DeviceCredentials
@@ -73,6 +94,10 @@ internal class WAClient(
     private var noise: NoiseTransport? = null
     private var expectReconnect = false
     private var closing = false
+    /** Reached `success` on this attempt — i.e. the drop is worth retrying quickly. */
+    private var loggedIn = false
+    /** Set by a stanza that already explains the end, so the read loop does not have to guess. */
+    private var endReason: Ended? = null
     private var ownLid: String? = null
     private val rng = java.security.SecureRandom()
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
@@ -101,7 +126,7 @@ internal class WAClient(
         }
     )
 
-    suspend fun connect() {
+    suspend fun connect(): Ended {
         credentials = credentialStore.load() ?: DeviceCredentials.generate().also { credentialStore.save(it) }
 
         val t = transportFactory().also { transport = it }
@@ -116,10 +141,10 @@ internal class WAClient(
         noise = NoiseHandshake(WaCertVerifier).perform(t, credentials.noiseKey, payload)
         Log.i(TAG, "handshake complete")
         startKeepAlive()
-        readLoop(t, noise!!)
+        return readLoop(t, noise!!)
     }
 
-    private suspend fun readLoop(transport: OkHttpFrameTransport, noise: NoiseTransport) {
+    private suspend fun readLoop(transport: OkHttpFrameTransport, noise: NoiseTransport): Ended {
         try {
             while (true) {
                 val node = WaBinary.unmarshal(noise.decrypt(transport.receiveFrame()))
@@ -130,18 +155,15 @@ internal class WAClient(
             throw e
         } catch (e: Exception) {
             keepAliveJob?.cancel()
-            // The post-pairing teardown can surface as a clean channel close, a stream:error 515,
-            // or a bare TLS close (an SSLException from the read). Reconnect for all of them when a
-            // reconnect is expected; only a genuine, unexpected drop is reported as disconnected.
+            // Every end arrives here as a failed read, whatever caused it: a clean channel close, a
+            // stream:error 515, or the bare TLS close_notify an idle socket gets reaped with. What
+            // it *means* is decided by the flags a stanza set on the way past, not by the exception.
             Log.w(TAG, "read loop ended (closing=$closing expectReconnect=$expectReconnect): ${e.message}")
-            if (closing) {
-                // A deliberate logout: neither reconnect nor report this as a failure.
-                Log.i(TAG, "socket closed by logout")
-            } else if (expectReconnect) {
-                expectReconnect = false
-                connect() // reconnect with the login payload after pairing
-            } else {
-                listener.onDisconnected(if (e is ClosedReceiveChannelException) null else e)
+            return when {
+                closing -> Ended.Closed.also { Log.i(TAG, "socket closed by logout") }
+                endReason != null -> endReason!!
+                expectReconnect -> Ended.Reconnect
+                else -> Ended.Dropped(if (e is ClosedReceiveChannelException) null else e, loggedIn)
             }
         }
     }
@@ -164,6 +186,7 @@ internal class WAClient(
                 // and burns pre-keys it cannot then find.
                 val ownPn = credentials.deviceJid?.substringBefore('@')?.substringBefore(':')
                 if (ownLid != null && ownPn != null) lids.record(ownLid!!, ownPn, "login")
+                loggedIn = true
                 runCatching { uploadPreKeysIfNeeded() }
                 runCatching { sendActive() }
                 listener.onLoggedIn()
@@ -175,8 +198,12 @@ internal class WAClient(
             "notification" -> handleNotification(node)
             "call" -> sendAck(node)
             "failure" -> {
+                val reason = node.attr("reason")
                 Log.w(TAG, "failure node: ${node.attrs}")
-                listener.onDisconnected(IllegalStateException("stream failure: ${node.attr("reason")}"))
+                // Previously this only reported: the read loop carried on afterwards, so the socket
+                // stayed half-alive with the caller already told it was gone.
+                endReason = endedFor(reason, "stream failure")
+                transport?.close()
             }
             "stream:error" -> handleStreamError(node)
             else -> {
@@ -231,11 +258,20 @@ internal class WAClient(
         val code = node.attr("code")
         if (code == "515") {
             expectReconnect = true
-            transport?.close()
         } else {
-            listener.onDisconnected(IllegalStateException("stream error${code?.let { ": $it" }.orEmpty()}"))
+            endReason = endedFor(code, "stream error")
         }
+        transport?.close()
     }
+
+    /**
+     * 401 means the primary device removed this companion from its Linked devices list. The
+     * credentials are dead, so reconnecting would spin forever against a server that will keep
+     * refusing — everything else is worth another attempt.
+     */
+    private fun endedFor(code: String?, label: String): Ended =
+        if (code == "401") Ended.Unlinked
+        else Ended.Dropped(IllegalStateException("$label${code?.let { ": $it" }.orEmpty()}"), loggedIn)
 
     private suspend fun handleMessage(node: Node) {
         val encTypes = node.childrenWithTag("enc").map { it.attr("type") ?: "?" }
@@ -514,8 +550,10 @@ internal class WAClient(
             Log.i(TAG, "paired & signed; awaiting reconnect for login")
             listener.onPaired(jid)
         } catch (e: Exception) {
+            // End the attempt rather than carrying on half-paired; a redial issues a fresh QR.
             Log.w(TAG, "pairing failed", e)
-            listener.onDisconnected(e)
+            endReason = Ended.Dropped(e, wasConnected = false)
+            transport?.close()
         }
     }
 

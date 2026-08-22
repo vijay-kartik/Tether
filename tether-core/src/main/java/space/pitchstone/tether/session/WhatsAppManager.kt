@@ -9,14 +9,22 @@ import space.pitchstone.tether.client.WAClient
 import space.pitchstone.tether.signal.MessageDecryptor
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
 import kotlinx.coroutines.SupervisorJob
+import kotlinx.coroutines.async
+import kotlinx.coroutines.awaitCancellation
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.coroutineScope
+import kotlinx.coroutines.currentCoroutineContext
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.onTimeout
+import kotlinx.coroutines.selects.select
 
 /**
  * Owner of the native WhatsApp connection: builds the Room-backed stores, runs the [WAClient] on
@@ -192,10 +200,27 @@ class WhatsAppManager(
     private var client: WAClient? = null
     private var service: WaForegroundService? = null
 
+    @Volatile private var running = false
+    private val network = NetworkMonitor(appContext)
+
+    /**
+     * A nudge to stop waiting and redial now. Conflated: several taps of Reconnect are one retry,
+     * and a nudge that arrives while we are already connecting is not worth queueing.
+     */
+    private val retryNow = Channel<Unit>(Channel.CONFLATED)
+
     fun connect() {
-        if (client != null) return
+        if (running) return
         _state.update { it.copy(status = "Connecting…") }
         appContext.startForegroundService(Intent(appContext, WaForegroundService::class.java))
+    }
+
+    /**
+     * Try again now rather than when the backoff expires — what a "Reconnect" control calls. Starts
+     * the connection if the loop has stopped altogether.
+     */
+    fun reconnect() {
+        if (running) retryNow.trySend(Unit) else connect()
     }
 
     /** Mark the first-run gate satisfied without linking ("Skip for now"). */
@@ -249,14 +274,86 @@ class WhatsAppManager(
         service = null
     }
 
+    /**
+     * Connect, and keep reconnecting until told to stop.
+     *
+     * A long-lived companion socket does not stay up: the server, a NAT, or the carrier reaps it
+     * once it goes quiet, which arrives as a TLS close_notify. whatsmeow treats that as routine and
+     * simply redials, and so do we — no keepalive survives Doze, so the answer is to come back fast
+     * rather than to try never to drop.
+     */
     internal suspend fun runClient() {
-        val c = WAClient(credentialStore, keyValueStore, listener, config.deviceName)
-        client = c
-        runCatching { c.connect() }.onFailure { e ->
-            _state.update { it.copy(status = "Error: ${e.message}") }
+        if (running) return
+        running = true
+        var attempt = 0
+        try {
+            while (currentCoroutineContext().isActive) {
+                val c = WAClient(credentialStore, keyValueStore, listener, config.deviceName)
+                client = c
+                // A throw here is a failure to get a socket at all (no route, DNS, refused
+                // handshake) — the same thing as a drop, minus ever having been connected.
+                val ended = runCatching { c.connect() }
+                    .getOrElse { WAClient.Ended.Dropped(it, wasConnected = false) }
+                client = null
+
+                when (ended) {
+                    WAClient.Ended.Closed -> return
+                    WAClient.Ended.Unlinked -> {
+                        // The credentials are dead, so retrying is pointless. They are left in
+                        // place rather than wiped on the server's say-so; the user re-links.
+                        Log.w(config.logTag, "device is no longer linked; stopping")
+                        _state.update {
+                            it.copy(connected = false, status = "Not linked — log out and scan again")
+                        }
+                        stopService()
+                        return
+                    }
+                    WAClient.Ended.Reconnect -> attempt = 0
+                    is WAClient.Ended.Dropped -> {
+                        // A session that was up and then dropped starts the backoff over: far more
+                        // likely a reaped idle socket than a server refusing us.
+                        if (ended.wasConnected) attempt = 0
+                        attempt++
+                        Log.i(config.logTag, "disconnected (attempt $attempt): ${ended.cause?.message}")
+                        _state.update { it.copy(connected = false, status = "Disconnected") }
+                        waitBeforeRetry(attempt)
+                    }
+                }
+            }
+        } finally {
+            running = false
             client = null
         }
     }
+
+    /**
+     * Hold off before redialling — but stop early if the host asks for a retry, or if the network
+     * comes back while we were waiting out a backoff started with the radio off.
+     */
+    @OptIn(ExperimentalCoroutinesApi::class)
+    private suspend fun waitBeforeRetry(attempt: Int) = coroutineScope {
+        val online = network.isOnline()
+        val waitMs = if (online) backoffMs(attempt) else NO_NETWORK_WAIT_MS
+        _state.update {
+            it.copy(status = if (online) "Reconnecting in ${waitMs / 1000}s…" else "Waiting for network…")
+        }
+        service?.updateNotification(if (online) "Reconnecting…" else "Waiting for network…")
+
+        val networkBack = async { if (online) awaitCancellation() else network.awaitOnline() }
+        try {
+            select {
+                onTimeout(waitMs) {}
+                retryNow.onReceive {}
+                networkBack.onAwait {}
+            }
+        } finally {
+            networkBack.cancel()
+        }
+    }
+
+    /** Exponential, capped. [attempt] is clamped so the shift cannot run away. */
+    private fun backoffMs(attempt: Int): Long =
+        minOf(RETRY_BASE_MS shl (attempt.coerceIn(1, RETRY_MAX_SHIFT) - 1), RETRY_CAP_MS)
 
     /**
      * Map a decrypted result to the public [Received] shape, dropping device-to-device plumbing.
@@ -303,11 +400,6 @@ class WhatsAppManager(
             deliveries.trySend(received)
         }
 
-        override fun onDisconnected(cause: Throwable?) {
-            _state.update { it.copy(connected = false, status = "Disconnected${cause?.message?.let { m -> ": $m" } ?: ""}") }
-            client = null
-            service?.stopSelf()
-        }
     }
 
     companion object {
@@ -315,6 +407,14 @@ class WhatsAppManager(
         const val DEFAULT_DEVICE_NAME = "Tether"
 
         private const val MAX_RECENT = 50
+
+        /** First retry delay; doubles per consecutive failure up to [RETRY_CAP_MS]. */
+        private const val RETRY_BASE_MS = 1_000L
+        private const val RETRY_CAP_MS = 60_000L
+        private const val RETRY_MAX_SHIFT = 7
+        /** With no network there is nothing to back off from — this is just a safety net if the
+         *  callback never fires. */
+        private const val NO_NETWORK_WAIT_MS = 60_000L
 
         /**
          * The process's active manager, so [WaForegroundService] — which Android instantiates via
