@@ -8,6 +8,19 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application>
+        <!-- So a downloaded attachment can be handed to a viewer app without every consumer of
+             this SDK having to declare a provider of their own. The ${applicationId} placeholder
+             keeps the authority unique per app, which the platform requires. -->
+        <provider
+            android:name="androidx.core.content.FileProvider"
+            android:authorities="${applicationId}.tether.fileprovider"
+            android:exported="false"
+            android:grantUriPermissions="true">
+            <meta-data
+                android:name="android.support.FILE_PROVIDER_PATHS"
+                android:resource="@xml/tether_file_paths" />
+        </provider>
+
         <service
             android:name="space.pitchstone.tether.session.WaForegroundService"
             android:exported="false"
