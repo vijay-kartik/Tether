@@ -7,7 +7,9 @@ import androidx.room.Room
 import space.pitchstone.tether.WaLog
 import space.pitchstone.tether.binary.ChatType
 import space.pitchstone.tether.client.WAClient
+import android.net.Uri
 import space.pitchstone.tether.media.MediaDownloader
+import space.pitchstone.tether.media.MediaFiles
 import space.pitchstone.tether.media.MediaInfo
 import space.pitchstone.tether.media.MediaRef
 import space.pitchstone.tether.signal.MessageDecryptor
@@ -28,6 +30,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.selects.onTimeout
 import kotlinx.coroutines.selects.select
 
@@ -237,6 +240,7 @@ class WhatsAppManager(
     private val retryNow = Channel<Unit>(Channel.CONFLATED)
 
     private val mediaDownloader by lazy { MediaDownloader() }
+    private val mediaFiles by lazy { MediaFiles(appContext) }
 
     /**
      * How to fetch each recent message's attachment, by message id.
@@ -285,6 +289,26 @@ class WhatsAppManager(
             .getOrThrow()
     }
 
+    /**
+     * Fetch the attachment on [id] and return a URI another app can open — what a "view" or
+     * "open with" action needs.
+     *
+     * The bytes are written to the app's cache and reused, so opening the same document twice
+     * costs one download. Grant the URI with `FLAG_GRANT_READ_URI_PERMISSION` when passing it in
+     * an Intent; it is served by a provider this SDK declares, so a host does not need one.
+     *
+     * @return null when there is nothing to fetch, or the message has aged out of the recent
+     *   window. Throws if a download fails its integrity checks.
+     */
+    suspend fun openableMedia(id: String, media: MediaInfo): Uri? {
+        val cached = mediaFiles.fileFor(id, media)
+        // A cache hit is the common case for a document opened more than once, and re-downloading
+        // to hand back the same bytes would be a round-trip for nothing.
+        if (cached.isFile && cached.length() > 0) return mediaFiles.uriFor(cached)
+        val bytes = downloadMedia(id) ?: return null
+        return mediaFiles.uriFor(withContext(Dispatchers.IO) { mediaFiles.write(id, media, bytes) })
+    }
+
     /** Attach [annotation] to the message [id], e.g. what a host app's pipeline decided about it. */
     fun annotate(id: String, annotation: Annotation) {
         _state.update { st -> st.copy(recent = st.recent.map { if (it.id == id) it.copy(annotation = annotation) else it }) }
@@ -306,6 +330,9 @@ class WhatsAppManager(
             runCatching {
                 credentialStore.clear()
                 keyValueStore.clearAll()
+                // Decrypted attachments are account state too — leaving them behind would keep
+                // readable copies of someone's messages after the account they came from is gone.
+                mediaFiles.clear()
             }.onFailure { Log.w(config.logTag, "credential wipe failed", it) }
 
             Log.i(config.logTag, "logout complete; local WhatsApp state erased")

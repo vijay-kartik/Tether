@@ -79,8 +79,25 @@ key that decrypts it — so downloads go by message id. Refs are kept for the sa
 bytes are returned (encrypted-blob SHA-256, a truncated HMAC over `iv || ciphertext`, then the
 plaintext SHA-256); a file that does not verify throws rather than returning.
 
-Images and stickers render in the sample UI. Video, audio and documents are described and can be
-downloaded, but are not displayed.
+Documents also carry a `fileName`. It comes from the sender, so it is sanitised before it reaches
+you — only the last path segment survives, and only characters that cannot traverse a directory.
+
+For anything that is not a picture, the useful action is to hand it to an app that understands it:
+
+```kotlin
+val uri = manager.openableMedia(received.id, media)   // downloads once, then caches
+startActivity(Intent(Intent.ACTION_VIEW).apply {
+    setDataAndType(uri, media.mimetype)
+    addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+})
+```
+
+The URI is served by a `FileProvider` the SDK declares in its own manifest, so a consumer does not
+have to stand one up. Files live under the app's cache directory and are deleted on `logout()`
+along with the rest of the account state.
+
+Images and stickers render inline in the sample UI; documents, video and audio appear as a file
+row that opens externally.
 
 ### Staying connected
 

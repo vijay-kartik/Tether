@@ -1,8 +1,11 @@
 package space.pitchstone.tether.ui
 
+import android.content.Context
+import android.content.Intent
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.graphics.Color
+import android.net.Uri
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -35,6 +38,7 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.style.TextOverflow
@@ -44,6 +48,7 @@ import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import space.pitchstone.tether.binary.ChatType
 import space.pitchstone.tether.media.MediaInfo
+import space.pitchstone.tether.media.MediaKind
 import space.pitchstone.tether.session.WhatsAppManager
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
@@ -107,6 +112,7 @@ fun WhatsAppScreen(manager: WhatsAppManager, modifier: Modifier = Modifier, onSk
             onReconnect = manager::reconnect,
             onLogout = { confirmLogout = true },
             onDownload = manager::downloadMedia,
+            onOpen = manager::openableMedia,
         )
     } else {
         Pairing(modifier = modifier, status = state.status, qr = qr, paired = state.paired, onSkip = onSkip, onConnect = manager::connect)
@@ -124,6 +130,7 @@ private fun LinkedAccount(
     onReconnect: () -> Unit,
     onLogout: () -> Unit,
     onDownload: suspend (String) -> ByteArray?,
+    onOpen: suspend (String, MediaInfo) -> Uri?,
 ) {
     Column(modifier = modifier.fillMaxSize().padding(16.dp)) {
         Row(
@@ -167,11 +174,11 @@ private fun LinkedAccount(
                     // No `key`: one <message> node can produce several parts under the same id
                     // (a group message carries its sender-key enc alongside the skmsg), and
                     // duplicate keys are a hard error in LazyColumn.
-                    items(personal) { ReceivedRow(it, onDownload) }
+                    items(personal) { ReceivedRow(it, onDownload, onOpen) }
                 }
                 if (groups.isNotEmpty()) {
                     item { SectionHeader("Groups") }
-                    items(groups) { ReceivedRow(it, onDownload) }
+                    items(groups) { ReceivedRow(it, onDownload, onOpen) }
                 }
             }
         }
@@ -196,6 +203,7 @@ private fun SectionHeader(title: String) {
 private fun ReceivedRow(
     message: WhatsAppManager.Received,
     onDownload: suspend (String) -> ByteArray?,
+    onOpen: suspend (String, MediaInfo) -> Uri?,
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
@@ -233,7 +241,7 @@ private fun ReceivedRow(
                         modifier = Modifier.padding(top = 2.dp),
                     )
                 }
-                message.media?.let { media -> MediaBlock(message.id, media, onDownload) }
+                message.media?.let { media -> MediaBlock(message.id, media, onDownload, onOpen) }
 
                 // A caption is the message's text, so an attachment with one shows it here and
                 // needs no placeholder. Only a genuinely wordless message falls back to its kind.
@@ -359,6 +367,7 @@ private fun MediaBlock(
     messageId: String,
     media: MediaInfo,
     onDownload: suspend (String) -> ByteArray?,
+    onOpen: suspend (String, MediaInfo) -> Uri?,
 ) {
     var full by remember(messageId) { mutableStateOf<ImageBitmap?>(null) }
     var loading by remember(messageId) { mutableStateOf(false) }
@@ -433,3 +442,94 @@ private fun sizeLabel(bytes: Long): String = when {
     bytes < 1024 * 1024 -> "${bytes / 1024} KB"
     else -> "%.1f MB".format(bytes / (1024.0 * 1024.0))
 }
+
+/**
+ * A non-image attachment: what it is, and a way to open it in whatever app handles that type.
+ *
+ * The bytes are fetched and cached by the SDK; this only asks for a URI and hands it on. Any
+ * inline preview the message carried (a document's first page, a video's poster frame) is shown
+ * above, because it costs nothing and says more than a filename does.
+ */
+@Composable
+private fun FileAttachment(
+    messageId: String,
+    media: MediaInfo,
+    onOpen: suspend (String, MediaInfo) -> Uri?,
+) {
+    val context = LocalContext.current
+    val scope = rememberCoroutineScope()
+    var busy by remember(messageId) { mutableStateOf(false) }
+    var error by remember(messageId) { mutableStateOf<String?>(null) }
+    val poster = remember(messageId) { media.thumbnail?.let(::decodeImage) }
+
+    val label = media.fileName ?: media.kind.name.lowercase()
+    val detail = listOfNullOrBlank(sizeLabel(media.fileLength), media.mimetype).joinToString(" · ")
+
+    Column(
+        Modifier
+            .padding(top = 6.dp)
+            .fillMaxWidth()
+            .clip(MaterialTheme.shapes.small)
+            .then(
+                if (media.downloadable && !busy) {
+                    Modifier.clickable {
+                        busy = true
+                        error = null
+                        scope.launch {
+                            runCatching { onOpen(messageId, media) }
+                                .onSuccess { uri ->
+                                    if (uri == null) error = "Nothing to open"
+                                    else if (!openWith(context, uri, media.mimetype)) {
+                                        // The file downloaded fine; there is simply nothing
+                                        // installed that opens it. Saying so beats a bare failure.
+                                        error = "No app can open this file"
+                                    }
+                                }
+                                .onFailure { error = it.message ?: "Could not open" }
+                            busy = false
+                        }
+                    }
+                } else Modifier
+            ),
+    ) {
+        poster?.let {
+            Image(
+                bitmap = it,
+                contentDescription = null,
+                modifier = Modifier.fillMaxWidth().heightIn(max = 160.dp),
+            )
+        }
+        Text(label, style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+        Text(
+            when {
+                busy -> "Opening…"
+                error != null -> error!!
+                media.downloadable -> "$detail · tap to open"
+                else -> "$detail · unavailable"
+            },
+            style = MaterialTheme.typography.labelSmall,
+            color = if (error != null) MaterialTheme.colorScheme.error
+            else MaterialTheme.colorScheme.onSurfaceVariant,
+        )
+    }
+}
+
+/**
+ * Hands [uri] to whatever app claims the type.
+ *
+ * @return false when nothing on the device does — the caller can say so, rather than the tap
+ *   appearing to do nothing at all.
+ */
+private fun openWith(context: Context, uri: Uri, mimetype: String?): Boolean {
+    val intent = Intent(Intent.ACTION_VIEW).apply {
+        setDataAndType(uri, mimetype?.takeIf { it.isNotBlank() } ?: "*/*")
+        // Without this the receiving app gets a URI it is not allowed to read.
+        addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+    }
+    return runCatching { context.startActivity(Intent.createChooser(intent, "Open with").addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)) }
+        .isSuccess
+}
+
+private fun listOfNullOrBlank(vararg parts: String?): List<String> =
+    parts.filterNotNull().filter { it.isNotBlank() }
