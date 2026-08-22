@@ -61,6 +61,27 @@ group's subject is fetched in the background rather than blocking delivery — s
 from a new group arrives with `chatName` null and is filled in, in `state.recent`, once the answer
 lands. A subject *changed* after we learned it is not yet picked up.
 
+### Attachments
+
+A message with an attachment carries a `MediaInfo` — kind, mimetype, size, dimensions, and a
+`thumbnail`: a small JPEG that rides *inside* the message, so a photo can be shown the moment it
+arrives with no network at all. Captions come through as the message's `text`.
+
+The full file is a separate HTTPS fetch from WhatsApp's CDN, decrypted on the way in:
+
+```kotlin
+val bytes = manager.downloadMedia(received.id)   // suspends; null if nothing to fetch
+```
+
+The media key never leaves the SDK — a host that wants to show a picture has no reason to hold the
+key that decrypts it — so downloads go by message id. Refs are kept for the same window as
+`state.recent`, so anything still on screen is still fetchable. Integrity is checked before the
+bytes are returned (encrypted-blob SHA-256, a truncated HMAC over `iv || ciphertext`, then the
+plaintext SHA-256); a file that does not verify throws rather than returning.
+
+Images and stickers render in the sample UI. Video, audio and documents are described and can be
+downloaded, but are not displayed.
+
 ### Staying connected
 
 A companion socket does not stay up: once it goes quiet, the server, a NAT or the carrier reaps

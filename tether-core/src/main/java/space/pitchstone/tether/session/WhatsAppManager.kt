@@ -7,6 +7,9 @@ import androidx.room.Room
 import space.pitchstone.tether.WaLog
 import space.pitchstone.tether.binary.ChatType
 import space.pitchstone.tether.client.WAClient
+import space.pitchstone.tether.media.MediaDownloader
+import space.pitchstone.tether.media.MediaInfo
+import space.pitchstone.tether.media.MediaRef
 import space.pitchstone.tether.signal.MessageDecryptor
 import space.pitchstone.tether.store.ChatNames
 import kotlinx.coroutines.CoroutineScope
@@ -105,6 +108,11 @@ class WhatsAppManager(
          * Null for our own messages, and for anyone who has never announced a name.
          */
         val senderName: String?,
+        /**
+         * The attachment on this message, if any: what it is, how big, and a free inline preview.
+         * Fetch the full file with [downloadMedia] — the key that decrypts it stays inside the SDK.
+         */
+        val media: MediaInfo? = null,
         /** A host app's note about this message, attached later via [annotate]. */
         val annotation: Annotation? = null,
     )
@@ -228,6 +236,21 @@ class WhatsAppManager(
      */
     private val retryNow = Channel<Unit>(Channel.CONFLATED)
 
+    private val mediaDownloader by lazy { MediaDownloader() }
+
+    /**
+     * How to fetch each recent message's attachment, by message id.
+     *
+     * Kept here instead of on [Received] because a ref carries the media's decryption key, and a
+     * host that wants to show a photo has no business holding one. Bounded to the same window as
+     * [State.recent], so anything still on screen is still downloadable and nothing accumulates.
+     */
+    private val mediaRefs = java.util.Collections.synchronizedMap(
+        object : LinkedHashMap<String, MediaRef>(16, 0.75f, false) {
+            override fun removeEldestEntry(eldest: MutableMap.MutableEntry<String, MediaRef>) = size > MAX_RECENT
+        }
+    )
+
     fun connect() {
         if (running) return
         _state.update { it.copy(status = "Connecting…") }
@@ -245,6 +268,21 @@ class WhatsAppManager(
     /** Mark the first-run gate satisfied without linking ("Skip for now"). */
     fun skipOnboarding() {
         _state.update { it.copy(onboardingDone = true) }
+    }
+
+    /**
+     * Fetch and decrypt the attachment on the message with this [id].
+     *
+     * Suspends for the length of an HTTPS round-trip; runs off the socket entirely, so it can never
+     * stall message delivery. Returns null when there is nothing to fetch — no attachment, nothing
+     * downloadable, or the message has aged out of the recent window. Throws only if a download
+     * arrives and fails its integrity checks: bytes that did not verify are never returned.
+     */
+    suspend fun downloadMedia(id: String): ByteArray? {
+        val ref = mediaRefs[id] ?: return null
+        return runCatching { mediaDownloader.download(ref) }
+            .onFailure { Log.w(config.logTag, "media download failed for id=$id", it) }
+            .getOrThrow()
     }
 
     /** Attach [annotation] to the message [id], e.g. what a host app's pipeline decided about it. */
@@ -384,10 +422,12 @@ class WhatsAppManager(
             Log.i(config.logTag, "id=${result.id} is protocol traffic (category=${result.category}), not surfaced")
             return null
         }
+        result.mediaRef?.let { mediaRefs[result.id] = it }
         return Received(
             id = result.id,
             phone = if (result.fromMe) result.recipientPhone else result.senderPhone,
             chatType = result.chatType,
+            media = result.media,
             chatName = if (result.chatType == ChatType.GROUP) names.groupSubject(result.chat) else null,
             senderName = result.senderName,
             text = MessageDecryptor.textOf(result.message),

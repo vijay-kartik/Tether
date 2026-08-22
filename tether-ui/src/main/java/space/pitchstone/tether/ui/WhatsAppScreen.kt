@@ -1,14 +1,17 @@
 package space.pitchstone.tether.ui
 
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.Color
 import androidx.compose.foundation.Image
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -27,9 +30,12 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -37,8 +43,10 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
 import space.pitchstone.tether.binary.ChatType
+import space.pitchstone.tether.media.MediaInfo
 import space.pitchstone.tether.session.WhatsAppManager
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 import java.time.Instant
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
@@ -98,6 +106,7 @@ fun WhatsAppScreen(manager: WhatsAppManager, modifier: Modifier = Modifier, onSk
             connected = state.connected,
             onReconnect = manager::reconnect,
             onLogout = { confirmLogout = true },
+            onDownload = manager::downloadMedia,
         )
     } else {
         Pairing(modifier = modifier, status = state.status, qr = qr, paired = state.paired, onSkip = onSkip, onConnect = manager::connect)
@@ -114,6 +123,7 @@ private fun LinkedAccount(
     connected: Boolean,
     onReconnect: () -> Unit,
     onLogout: () -> Unit,
+    onDownload: suspend (String) -> ByteArray?,
 ) {
     Column(modifier = modifier.fillMaxSize().padding(16.dp)) {
         Row(
@@ -157,11 +167,11 @@ private fun LinkedAccount(
                     // No `key`: one <message> node can produce several parts under the same id
                     // (a group message carries its sender-key enc alongside the skmsg), and
                     // duplicate keys are a hard error in LazyColumn.
-                    items(personal) { ReceivedRow(it) }
+                    items(personal) { ReceivedRow(it, onDownload) }
                 }
                 if (groups.isNotEmpty()) {
                     item { SectionHeader("Groups") }
-                    items(groups) { ReceivedRow(it) }
+                    items(groups) { ReceivedRow(it, onDownload) }
                 }
             }
         }
@@ -183,7 +193,10 @@ private fun SectionHeader(title: String) {
  * read as ours at a glance.
  */
 @Composable
-private fun ReceivedRow(message: WhatsAppManager.Received) {
+private fun ReceivedRow(
+    message: WhatsAppManager.Received,
+    onDownload: suspend (String) -> ByteArray?,
+) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = if (message.fromMe) Arrangement.End else Arrangement.Start,
@@ -220,13 +233,18 @@ private fun ReceivedRow(message: WhatsAppManager.Received) {
                         modifier = Modifier.padding(top = 2.dp),
                     )
                 }
-                Text(
-                    // A message with no text still deserves a row — otherwise a photo that arrived
-                    // fine is indistinguishable from one that never came.
-                    message.text ?: "(${message.kind})",
-                    style = MaterialTheme.typography.bodyMedium,
-                    modifier = Modifier.padding(top = 4.dp),
-                )
+                message.media?.let { media -> MediaBlock(message.id, media, onDownload) }
+
+                // A caption is the message's text, so an attachment with one shows it here and
+                // needs no placeholder. Only a genuinely wordless message falls back to its kind.
+                val body = message.text ?: if (message.media == null) "(${message.kind})" else null
+                body?.let {
+                    Text(
+                        it,
+                        style = MaterialTheme.typography.bodyMedium,
+                        modifier = Modifier.padding(top = 4.dp),
+                    )
+                }
                 message.annotation?.let { annotation ->
                     Text(
                         annotation.label,
@@ -327,4 +345,91 @@ private fun conversationLabel(message: WhatsAppManager.Received): String? = when
     ChatType.NEWSLETTER -> message.chatName ?: "Channel"
     ChatType.OTHER -> message.chatJid.substringBefore('@')
     ChatType.DIRECT -> null
+}
+
+/**
+ * An attachment: its inline preview straight away, and the full file on demand.
+ *
+ * The thumbnail comes free inside the message, so something is on screen the moment it arrives —
+ * a download is a network round-trip and should never be the difference between showing a photo
+ * and showing nothing. Tapping fetches and decrypts the real thing, which then replaces it.
+ */
+@Composable
+private fun MediaBlock(
+    messageId: String,
+    media: MediaInfo,
+    onDownload: suspend (String) -> ByteArray?,
+) {
+    var full by remember(messageId) { mutableStateOf<ImageBitmap?>(null) }
+    var loading by remember(messageId) { mutableStateOf(false) }
+    var error by remember(messageId) { mutableStateOf<String?>(null) }
+    val scope = rememberCoroutineScope()
+
+    val preview = remember(messageId) { media.thumbnail?.let(::decodeImage) }
+    val shown = full ?: preview
+
+    val fetch = {
+        loading = true
+        error = null
+        scope.launch {
+            runCatching { onDownload(messageId) }
+                .onSuccess { bytes ->
+                    full = bytes?.let(::decodeImage)
+                    // Bytes that are not decodable are not a failure to download — say which.
+                    if (full == null) error = "Could not show this image"
+                }
+                .onFailure { error = it.message ?: "Download failed" }
+            loading = false
+        }
+        Unit
+    }
+
+    Column(Modifier.padding(top = 6.dp)) {
+        if (shown != null) {
+            Image(
+                bitmap = shown,
+                contentDescription = media.kind.name.lowercase(),
+                modifier = Modifier
+                    .fillMaxWidth()
+                    // Height is capped rather than free: a tall photo would otherwise push every
+                    // other message off the screen.
+                    .heightIn(max = 240.dp)
+                    .clip(MaterialTheme.shapes.small)
+                    .then(if (full == null && media.downloadable && !loading) Modifier.clickable(onClick = fetch) else Modifier),
+            )
+        }
+
+        val caption = when {
+            loading -> "Loading…"
+            error != null -> error
+            // Without a preview there is nothing on screen at all, so say what is here and that it
+            // can be fetched.
+            shown == null && media.downloadable -> "${media.kind.name.lowercase()} · ${sizeLabel(media.fileLength)} · tap to load"
+            shown == null -> "${media.kind.name.lowercase()} · unavailable"
+            full == null && media.downloadable -> "Preview · tap for full size"
+            else -> null
+        }
+        caption?.let {
+            Text(
+                it,
+                style = MaterialTheme.typography.labelSmall,
+                color = if (error != null) MaterialTheme.colorScheme.error
+                else MaterialTheme.colorScheme.onSurfaceVariant,
+                modifier = Modifier
+                    .padding(top = 4.dp)
+                    .then(if (shown == null && media.downloadable && !loading) Modifier.clickable(onClick = fetch) else Modifier),
+            )
+        }
+    }
+}
+
+/** Decodes to null rather than throwing: a video or document's bytes are not an image. */
+private fun decodeImage(bytes: ByteArray): ImageBitmap? =
+    runCatching { BitmapFactory.decodeByteArray(bytes, 0, bytes.size)?.asImageBitmap() }.getOrNull()
+
+private fun sizeLabel(bytes: Long): String = when {
+    bytes <= 0L -> "unknown size"
+    bytes < 1024 -> "$bytes B"
+    bytes < 1024 * 1024 -> "${bytes / 1024} KB"
+    else -> "%.1f MB".format(bytes / (1024.0 * 1024.0))
 }
