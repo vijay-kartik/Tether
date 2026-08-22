@@ -41,8 +41,22 @@ internal class OkHttpFrameTransport(
     /** Opens the socket; suspends until the server accepts the upgrade (or fails). */
     suspend fun connect() {
         val request = Request.Builder().url(url).header("Origin", origin).build()
-        webSocket = client.newWebSocket(request, listener)
-        opened.await()
+        val ws = client.newWebSocket(request, listener)
+        webSocket = ws
+        try {
+            opened.await()
+        } catch (t: Throwable) {
+            // The caller gave up (or the upgrade failed) while the handshake was still in flight.
+            // Without this the socket OkHttp already started is never torn down: the TCP
+            // connection stays open, its reader thread stays alive, and `onOpen` eventually
+            // completes a Deferred nobody is listening to.
+            //
+            // cancel() and not close(): close() asks for a graceful WebSocket shutdown, which
+            // only works once the connection is actually established — on a socket still
+            // mid-upgrade it is a no-op and leaks exactly what we are trying to release.
+            ws.cancel()
+            throw t
+        }
     }
 
     override suspend fun sendFrame(payload: ByteArray) {

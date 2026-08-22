@@ -61,7 +61,7 @@ internal class WAClient(
         fun onPaired(jid: String)
         fun onLoggedIn()
         /** Decrypted incoming messages (DMs/groups). */
-        fun onMessage(messages: List<MessageDecryptor.Result>) {}
+        suspend fun onMessage(messages: List<MessageDecryptor.Result>) {}
         fun onNode(node: Node) {}
         fun onDisconnected(cause: Throwable?) {}
     }

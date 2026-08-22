@@ -11,6 +11,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -115,8 +116,19 @@ class WhatsAppManager(
 
     private val _state = MutableStateFlow(State())
     val state: StateFlow<State> = _state.asStateFlow()
+    private val deliveries = Channel<List<Received>>(capacity = 64)
 
     @Volatile private var started = false
+
+    init {
+        scope.launch {
+            for (batch in deliveries) {
+                runCatching {
+                    onMessages(batch)
+                }.onFailure { Log.w(config.logTag, "host onMessages threw", it) }
+            }
+        }
+    }
 
     /**
      * Bring the session up: read persisted credentials and, if this device is already linked,
@@ -162,6 +174,7 @@ class WhatsAppManager(
         if (!started) return
         started = false
         stopService()
+        deliveries.close()
         scope.cancel()
         // Only if something actually opened it — touching `db` here would build a database purely
         // in order to close it, which is exactly the construction-time I/O this change removed.
@@ -277,11 +290,11 @@ class WhatsAppManager(
             service?.updateNotification("Connected")
         }
 
-        override fun onMessage(messages: List<MessageDecryptor.Result>) {
+        override suspend fun onMessage(messages: List<MessageDecryptor.Result>) {
             val received = messages.mapNotNull(::toReceived)
             if (received.isEmpty()) return
             _state.update { it.copy(recent = (received.asReversed() + it.recent).take(MAX_RECENT)) }
-            scope.launch { onMessages(received) }
+            deliveries.trySend(received)
         }
 
         override fun onDisconnected(cause: Throwable?) {
