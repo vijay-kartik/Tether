@@ -134,12 +134,6 @@ private fun LinkedAccount(
 
         HorizontalDivider(Modifier.padding(vertical = 12.dp))
 
-        Text(
-            "Messages",
-            style = MaterialTheme.typography.labelLarge,
-            modifier = Modifier.padding(bottom = 8.dp),
-        )
-
         if (recent.isEmpty()) {
             Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                 Text(
@@ -148,17 +142,40 @@ private fun LinkedAccount(
                 )
             }
         } else {
+            // Everything that is not one-to-one goes under Groups — a broadcast or a channel is
+            // not a personal chat, and each row names its own conversation, so nothing is
+            // mislabelled by sharing the section.
+            val (personal, groups) = recent.partition { it.chatType == ChatType.DIRECT }
             LazyColumn(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
-                // No `key`: one <message> node can produce several parts under the same id
-                // (a group message carries its sender-key enc alongside the skmsg), and
-                // duplicate keys are a hard error in LazyColumn.
-                items(recent) { ReceivedRow(it) }
+                // A section with nothing in it would be a heading over blank space, so each
+                // appears only once it has something to show.
+                if (personal.isNotEmpty()) {
+                    item { SectionHeader("Personal") }
+                    // No `key`: one <message> node can produce several parts under the same id
+                    // (a group message carries its sender-key enc alongside the skmsg), and
+                    // duplicate keys are a hard error in LazyColumn.
+                    items(personal) { ReceivedRow(it) }
+                }
+                if (groups.isNotEmpty()) {
+                    item { SectionHeader("Groups") }
+                    items(groups) { ReceivedRow(it) }
+                }
             }
         }
     }
+}
+
+@Composable
+private fun SectionHeader(title: String) {
+    Text(
+        title,
+        style = MaterialTheme.typography.labelLarge,
+        color = MaterialTheme.colorScheme.primary,
+        modifier = Modifier.padding(top = 4.dp, bottom = 2.dp),
+    )
 }
 
 /**
@@ -191,9 +208,9 @@ private fun ReceivedRow(message: WhatsAppManager.Received) {
                     )
                     Text(clockTime(message.timestampMillis), style = MaterialTheme.typography.labelSmall)
                 }
-                // In a group the sender alone does not say where the message landed, so name the
-                // conversation too. A direct chat needs no second line: the sender *is* the chat.
-                groupLabel(message)?.let { group ->
+                // The section says personal-or-group; this says which group, since two sections
+                // cannot. A direct chat needs no second line: the sender *is* the chat.
+                conversationLabel(message)?.let { group ->
                     Text(
                         group,
                         style = MaterialTheme.typography.labelSmall,
@@ -300,12 +317,14 @@ private fun senderLabel(message: WhatsAppManager.Received): String {
 }
 
 /**
- * The conversation line for a group, or null where the header already says everything. Falls back
- * to the group's id while its subject is still being fetched, so the row never looks like a DM.
+ * Which conversation this row belongs to. Null for a direct chat, where the section and the sender
+ * already say everything. Falls back to the group's id while its subject is still being fetched, so
+ * a row is never left unattributed.
  */
-private fun groupLabel(message: WhatsAppManager.Received): String? = when (message.chatType) {
-    ChatType.GROUP -> "in ${message.chatName ?: message.chatJid.substringBefore('@')}"
-    ChatType.BROADCAST -> "in Status / broadcast"
-    ChatType.NEWSLETTER -> "in ${message.chatName ?: "a channel"}"
-    ChatType.DIRECT, ChatType.OTHER -> null
+private fun conversationLabel(message: WhatsAppManager.Received): String? = when (message.chatType) {
+    ChatType.GROUP -> message.chatName ?: message.chatJid.substringBefore('@')
+    ChatType.BROADCAST -> "Status / broadcast"
+    ChatType.NEWSLETTER -> message.chatName ?: "Channel"
+    ChatType.OTHER -> message.chatJid.substringBefore('@')
+    ChatType.DIRECT -> null
 }
