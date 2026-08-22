@@ -5,6 +5,9 @@ import space.pitchstone.tether.WaLog
 import space.pitchstone.tether.binary.ChatType
 import space.pitchstone.tether.binary.Jid
 import space.pitchstone.tether.binary.Node
+import space.pitchstone.tether.media.MediaInfo
+import space.pitchstone.tether.media.MediaRef
+import space.pitchstone.tether.media.mediaOf
 import space.pitchstone.tether.store.ChatNames
 import org.whispersystems.libsignal.SessionCipher
 import org.whispersystems.libsignal.SignalProtocolAddress
@@ -74,6 +77,10 @@ internal class MessageDecryptor(
          * distribution) rather than anything a person sent.
          */
         val category: String?,
+        /** Describes the attachment, if there is one. */
+        val media: MediaInfo?,
+        /** How to fetch that attachment — carries the decryption key, so it never leaves the SDK. */
+        val mediaRef: MediaRef?,
     )
 
     /** One `<enc>` part that could not be decrypted, kept so the caller can decide about retries. */
@@ -140,6 +147,7 @@ internal class MessageDecryptor(
 
                 val raw = Message.ADAPTER.decode(plaintext)
                 val unwrapped = unwrap(raw)
+                val media = mediaOf(unwrapped)
                 processProtocolParts(chat, sender, unwrapped)
 
                 val fromMe = raw.deviceSentMessage != null || isOwn(sender)
@@ -162,6 +170,8 @@ internal class MessageDecryptor(
                     timestampMillis = timestamp,
                     chatType = chatType,
                     senderName = if (fromMe) null else names.pushName(sender),
+                    media = media?.first,
+                    mediaRef = media?.second,
                     senderPhone = senderPhone,
                     recipientPhone = recipientPhoneOf(messageNode, raw),
                     category = category,
@@ -325,10 +335,17 @@ internal class MessageDecryptor(
             else -> "unknown"
         }
 
-        /** The plain-text body, or null when the payload carries no text (media, reactions, …). */
+        /**
+         * The plain-text body: a text message, or an attachment's caption — the caption is what
+         * the person typed, so dropping it would lose the message while keeping the picture.
+         * Null when the payload genuinely carries no text (an uncaptioned photo, a reaction, …).
+         */
         fun textOf(m: Message): String? =
             m.conversation?.takeIf { it.isNotBlank() }
                 ?: m.extendedTextMessage?.text?.takeIf { it.isNotBlank() }
+                ?: m.imageMessage?.caption?.takeIf { it.isNotBlank() }
+                ?: m.videoMessage?.caption?.takeIf { it.isNotBlank() }
+                ?: m.documentMessage?.caption?.takeIf { it.isNotBlank() }
 
         /**
          * Device-to-device plumbing rather than anything a person sent: app-state sync between
