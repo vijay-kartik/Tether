@@ -30,5 +30,9 @@ interface KeyValueStore {
         const val NS_SENDER_KEY = "signal_sender_key"
         /** LID → phone number, learned from the `*_pn` attributes on incoming stanzas. */
         const val NS_LID_PN = "wa_lid_pn"
+        /** Sender JID → WhatsApp push name, learned from the `notify` attribute on messages. */
+        const val NS_PUSH_NAME = "wa_push_name"
+        /** Group JID → subject, learned from a `w:g2` metadata query. */
+        const val NS_GROUP_SUBJECT = "wa_group_subject"
     }
 }

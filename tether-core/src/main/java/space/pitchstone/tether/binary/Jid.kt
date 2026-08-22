@@ -20,6 +20,9 @@ data class Jid(
     /** True for WhatsApp's privacy identifiers, whose [user] is a LID and NOT a phone number. */
     val isLid: Boolean get() = server == HIDDEN_USER_SERVER
 
+    /** True for a group chat, whose [user] identifies the group rather than any person. */
+    val isGroup: Boolean get() = server == GROUP_SERVER
+
     companion object {
         const val DEFAULT_USER_SERVER = "s.whatsapp.net"
         const val HIDDEN_USER_SERVER = "lid"

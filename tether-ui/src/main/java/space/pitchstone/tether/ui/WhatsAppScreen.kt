@@ -36,6 +36,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import com.google.zxing.BarcodeFormat
 import com.google.zxing.qrcode.QRCodeWriter
+import space.pitchstone.tether.binary.ChatType
 import space.pitchstone.tether.session.WhatsAppManager
 import kotlinx.coroutines.delay
 import java.time.Instant
@@ -182,17 +183,25 @@ private fun ReceivedRow(message: WhatsAppManager.Received) {
                     horizontalArrangement = Arrangement.SpaceBetween,
                 ) {
                     Text(
-                        when {
-                            message.fromMe && message.phone != null -> "You → ${message.phone}"
-                            message.fromMe -> "You"
-                            else -> message.phone ?: "Unknown sender"
-                        },
+                        senderLabel(message),
                         style = MaterialTheme.typography.labelLarge,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                         modifier = Modifier.weight(1f),
                     )
                     Text(clockTime(message.timestampMillis), style = MaterialTheme.typography.labelSmall)
+                }
+                // In a group the sender alone does not say where the message landed, so name the
+                // conversation too. A direct chat needs no second line: the sender *is* the chat.
+                groupLabel(message)?.let { group ->
+                    Text(
+                        group,
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.padding(top = 2.dp),
+                    )
                 }
                 Text(
                     // A message with no text still deserves a row — otherwise a photo that arrived
@@ -273,3 +282,30 @@ private fun qrBitmap(content: String, size: Int): Bitmap? = runCatching {
         }
     }
 }.getOrNull()
+
+/**
+ * Who sent this: their WhatsApp name where they have announced one, their number otherwise, and
+ * both when they differ — a name is what you recognise, a number is what you can act on.
+ */
+private fun senderLabel(message: WhatsAppManager.Received): String {
+    if (message.fromMe) return message.phone?.let { "You → $it" } ?: "You"
+    val name = message.senderName?.takeIf { it.isNotBlank() }
+    val phone = message.phone?.takeIf { it.isNotBlank() }
+    return when {
+        name != null && phone != null -> "$name · $phone"
+        name != null -> name
+        phone != null -> phone
+        else -> "Unknown sender"
+    }
+}
+
+/**
+ * The conversation line for a group, or null where the header already says everything. Falls back
+ * to the group's id while its subject is still being fetched, so the row never looks like a DM.
+ */
+private fun groupLabel(message: WhatsAppManager.Received): String? = when (message.chatType) {
+    ChatType.GROUP -> "in ${message.chatName ?: message.chatJid.substringBefore('@')}"
+    ChatType.BROADCAST -> "in Status / broadcast"
+    ChatType.NEWSLETTER -> "in ${message.chatName ?: "a channel"}"
+    ChatType.DIRECT, ChatType.OTHER -> null
+}
