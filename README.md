@@ -41,6 +41,26 @@ val manager = WhatsAppManager(
 setContent { WhatsAppScreen(manager) }
 ```
 
+### What a message tells you
+
+`Received` names the conversation as well as the message. `chatType` is a `ChatType` —
+`DIRECT`, `GROUP`, `BROADCAST`, `NEWSLETTER` or `OTHER` — rather than an `isGroup` flag, so a
+status update does not present as a one-to-one message. `chatName` carries a group's subject,
+`senderName` the sender's WhatsApp push name, and `phone` their number:
+
+```kotlin
+when (received.chatType) {
+    ChatType.GROUP  -> "${received.senderName ?: received.phone} in ${received.chatName}"
+    ChatType.DIRECT -> received.senderName ?: received.phone
+    else            -> received.chatJid
+}
+```
+
+Both names are best-effort. A push name only exists once that person has announced one, and a
+group's subject is fetched in the background rather than blocking delivery — so the first message
+from a new group arrives with `chatName` null and is filled in, in `state.recent`, once the answer
+lands. A subject *changed* after we learned it is not yet picked up.
+
 ### Staying connected
 
 A companion socket does not stay up: once it goes quiet, the server, a NAT or the carrier reaps

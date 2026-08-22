@@ -16,6 +16,7 @@ import space.pitchstone.tether.noise.WaCertVerifier
 import space.pitchstone.tether.signal.LidDirectory
 import space.pitchstone.tether.signal.MessageDecryptor
 import space.pitchstone.tether.signal.WaSignalStore
+import space.pitchstone.tether.store.ChatNames
 import space.pitchstone.tether.store.KeyValueStore
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.CoroutineScope
@@ -65,6 +66,8 @@ internal class WAClient(
         /** Decrypted incoming messages (DMs/groups). */
         suspend fun onMessage(messages: List<MessageDecryptor.Result>) {}
         fun onNode(node: Node) {}
+        /** A group's subject, once a metadata query has answered. */
+        fun onGroupSubject(chatJid: String, subject: String) {}
     }
 
     /**
@@ -110,6 +113,10 @@ internal class WAClient(
      * pre-keys means nobody can open a Signal session with us, so no message ever arrives.
      */
     private val lids = LidDirectory(keyValueStore)
+    private val names = ChatNames(keyValueStore)
+
+    /** Groups whose subject we have already asked for on this connection, to ask only once. */
+    private val askedGroups = java.util.Collections.synchronizedSet(mutableSetOf<String>())
 
     private val pendingIqs = java.util.Collections.synchronizedMap(
         // Bounded: a response we never get (or never match) must not leak. Keepalive pings alone
@@ -338,6 +345,7 @@ internal class WAClient(
 
         val from = node.jidAttr("from") ?: return
         val participant = node.jidAttr("participant")
+        if (from.isGroup) runCatching { requestGroupSubject(from) }
         if (failed) {
             // A normal delivery receipt would tell the sender "got it, all good" for a message we
             // couldn't actually read — and without a retry receipt, a sender whose cached session
@@ -354,6 +362,7 @@ internal class WAClient(
         ownUser = credentials.deviceJid?.substringBefore('@')?.substringBefore(':'),
         ownLid = ownLid,
         lids = lids,
+        names = names,
     )
 
     private suspend fun sendDeliveryReceipt(msgId: String, chat: Jid, participant: Jid?) {
@@ -450,9 +459,51 @@ internal class WAClient(
         )
     }
 
+    /**
+     * Ask for a group's subject, once per group per connection.
+     *
+     * Fired rather than awaited: the reply arrives on the read loop like any other stanza, and
+     * blocking message delivery on a metadata round-trip would stall every other message behind it.
+     * Messages seen before the answer land with no chat name and are back-filled via
+     * [Listener.onGroupSubject].
+     */
+    private suspend fun requestGroupSubject(group: Jid) {
+        val key = group.toString()
+        if (names.groupSubject(group) != null || !askedGroups.add(key)) return
+        sendNode(
+            Node(
+                "iq",
+                mapOf(
+                    "to" to group,
+                    "type" to "get",
+                    "xmlns" to "w:g2",
+                    "id" to trackedId(LABEL_GROUP_INFO),
+                ),
+                listOf(Node("query", mapOf("request" to "interactive"))),
+            )
+        )
+    }
+
+    /** `<iq from="…@g.us"><group subject="…">` — the answer to [requestGroupSubject]. */
+    private fun handleGroupInfo(node: Node) {
+        val group = node.jidAttr("from") ?: return
+        val subject = node.child("group")?.attr("subject")
+        if (subject.isNullOrEmpty()) {
+            Log.i(TAG, "group ${group.user} returned no subject")
+            return
+        }
+        Log.i(TAG, "group ${group.user} subject=$subject")
+        names.recordGroupSubject(group, subject)
+        listener.onGroupSubject(group.toString(), subject)
+    }
+
     private suspend fun handleIq(node: Node) {
         val id = node.attr("id")
         val label = id?.let { pendingIqs.remove(it) }
+        if (label == LABEL_GROUP_INFO && node.attr("type") != "error") {
+            handleGroupInfo(node)
+            return
+        }
         if (label != null) {
             val error = node.child("error")
             when {
@@ -761,6 +812,7 @@ internal class WAClient(
         const val LABEL_PING = "ping"
         const val LABEL_ACTIVE = "active"
         const val LABEL_PREKEYS = "prekey-upload"
+        const val LABEL_GROUP_INFO = "group-info"
         const val KEEPALIVE_MS = 20_000L
         const val MAX_PENDING_IQS = 32
         val TAG: String get() = WaLog.tag

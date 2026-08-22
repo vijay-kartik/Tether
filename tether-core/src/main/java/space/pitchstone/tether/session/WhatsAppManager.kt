@@ -5,8 +5,10 @@ import android.content.Intent
 import android.util.Log
 import androidx.room.Room
 import space.pitchstone.tether.WaLog
+import space.pitchstone.tether.binary.ChatType
 import space.pitchstone.tether.client.WAClient
 import space.pitchstone.tether.signal.MessageDecryptor
+import space.pitchstone.tether.store.ChatNames
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.ExperimentalCoroutinesApi
@@ -87,6 +89,22 @@ class WhatsAppManager(
         val senderJid: String,
         /** Chat JID, as text: the peer for a DM, the group for a group message. */
         val chatJid: String,
+        /** Whether this arrived in a one-to-one chat, a group, a broadcast or a channel. */
+        val chatType: ChatType,
+        /**
+         * The conversation's display name: a group's subject, or null for a direct chat, where
+         * [senderName] and [phone] already name the other party.
+         *
+         * Also null on the first message from a group — the subject is fetched in the background
+         * rather than blocking delivery, so it is filled in on this message in [recent] once the
+         * answer lands, and carried by later messages from the same group.
+         */
+        val chatName: String?,
+        /**
+         * The sender's WhatsApp display name (their push name), when the server has told us one.
+         * Null for our own messages, and for anyone who has never announced a name.
+         */
+        val senderName: String?,
         /** A host app's note about this message, attached later via [annotate]. */
         val annotation: Annotation? = null,
     )
@@ -125,6 +143,7 @@ class WhatsAppManager(
     }
     private val db by dbDelegate
     private val keyValueStore by lazy { RoomKeyValueStore(db.kvDao()) }
+    private val names by lazy { ChatNames(keyValueStore) }
     private val credentialStore by lazy { RoomCredentialStore(db.credentialsDao()) }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -368,6 +387,9 @@ class WhatsAppManager(
         return Received(
             id = result.id,
             phone = if (result.fromMe) result.recipientPhone else result.senderPhone,
+            chatType = result.chatType,
+            chatName = if (result.chatType == ChatType.GROUP) names.groupSubject(result.chat) else null,
+            senderName = result.senderName,
             text = MessageDecryptor.textOf(result.message),
             kind = MessageDecryptor.kindOf(result.message),
             timestampMillis = result.timestampMillis,
@@ -391,6 +413,14 @@ class WhatsAppManager(
         override fun onLoggedIn() {
             _state.update { it.copy(connected = true, onboardingDone = true, status = "Connected") }
             service?.updateNotification("Connected")
+        }
+
+        override fun onGroupSubject(chatJid: String, subject: String) {
+            // Messages from this group that were already delivered show no name; now that one is
+            // known, correct them in place rather than leaving a mix of named and unnamed rows.
+            _state.update { st ->
+                st.copy(recent = st.recent.map { if (it.chatJid == chatJid) it.copy(chatName = subject) else it })
+            }
         }
 
         override suspend fun onMessage(messages: List<MessageDecryptor.Result>) {

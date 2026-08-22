@@ -2,8 +2,10 @@ package space.pitchstone.tether.signal
 
 import android.util.Log
 import space.pitchstone.tether.WaLog
+import space.pitchstone.tether.binary.ChatType
 import space.pitchstone.tether.binary.Jid
 import space.pitchstone.tether.binary.Node
+import space.pitchstone.tether.store.ChatNames
 import org.whispersystems.libsignal.SessionCipher
 import org.whispersystems.libsignal.SignalProtocolAddress
 import org.whispersystems.libsignal.groups.GroupCipher
@@ -34,6 +36,7 @@ internal class MessageDecryptor(
     private val ownUser: String? = null,
     private val ownLid: String? = null,
     private val lids: LidDirectory? = null,
+    private val names: ChatNames,
 ) {
 
     data class Result(
@@ -44,6 +47,16 @@ internal class MessageDecryptor(
         val encType: String,
         val fromMe: Boolean,
         val timestampMillis: Long,
+        /**
+         * Which kind of conversation [chat] is. Derived from the JID's server, which is the only
+         * thing that distinguishes them on the wire — a caller should not have to know that.
+         */
+        val chatType: ChatType,
+        /**
+         * The sender's WhatsApp display name (`notify`), when the server sent one or we have been
+         * told it before. Never set for our own messages.
+         */
+        val senderName: String?,
         /**
          * The sender's phone number, when one can be determined. WhatsApp increasingly addresses
          * people by LID (an opaque privacy id) rather than by number, and a LID will never match a
@@ -77,6 +90,7 @@ internal class MessageDecryptor(
         val participant = messageNode.jidAttr("participant")
         val sender = participant ?: from   // group sender vs DM peer
         val chat = from
+        val chatType = ChatType.of(chat)
         val id = messageNode.attr("id").orEmpty()
         // `t` is the server-stamped send time in epoch seconds; offline-flushed messages can be
         // hours old, so preserve it rather than stamping arrival time.
@@ -128,14 +142,26 @@ internal class MessageDecryptor(
                 val unwrapped = unwrap(raw)
                 processProtocolParts(chat, sender, unwrapped)
 
+                val fromMe = raw.deviceSentMessage != null || isOwn(sender)
+                // `notify` is the sender's own display name, and the only place a name appears on
+                // an incoming message. Remember it — the server omits it often enough that reading
+                // it per message would make names flicker in and out.
+                //
+                // Only from a message someone else sent, though: our own copies from another device
+                // arrive with `from` set to the peer and no `participant`, so `sender` is the peer
+                // while any `notify` is ours. Recording that would file our name under their JID.
+                if (!fromMe) names.recordPushName(sender, messageNode.attr("notify"))
+
                 results += Result(
                     id = id,
                     sender = sender,
                     chat = chat,
                     message = unwrapped,
                     encType = type,
-                    fromMe = raw.deviceSentMessage != null || isOwn(sender),
+                    fromMe = fromMe,
                     timestampMillis = timestamp,
+                    chatType = chatType,
+                    senderName = if (fromMe) null else names.pushName(sender),
                     senderPhone = senderPhone,
                     recipientPhone = recipientPhoneOf(messageNode, raw),
                     category = category,
