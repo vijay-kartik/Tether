@@ -68,15 +68,13 @@ afterEvaluate {
                     name.set("Tether UI")
                     description.set("Optional Compose surface for Tether: QR pairing, connection status and an observed-message list.")
                     url.set("https://github.com/vijay-kartik/Tether")
-                    // TODO(license): the repo has no LICENSE file yet, so this declaration is
-                    //  not yet backed by anything. Add one (or change this) before publishing -
-                    //  a POM that names a licence the source does not carry is worse than useless
-                    //  to a consumer, and an artifact with no licence at all reads as
-                    //  all-rights-reserved.
+                    // GPLv3, matching the libsignal/curve25519 libraries this links: their
+                    // terms reach any app built against Tether, so advertising anything more
+                    // permissive here would misstate a consumer's obligations. See NOTICE.
                     licenses {
                         license {
-                            name.set("The Apache License, Version 2.0")
-                            url.set("https://www.apache.org/licenses/LICENSE-2.0.txt")
+                            name.set("GNU General Public License, Version 3")
+                            url.set("https://www.gnu.org/licenses/gpl-3.0.txt")
                         }
                     }
                     developers {

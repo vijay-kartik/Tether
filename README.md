@@ -134,5 +134,22 @@ so they never drift apart. Put credentials in `~/.gradle/gradle.properties` (`gp
 ./gradlew publishAllPublicationsToGitHubPackagesRepository
 ```
 
-> **Licence:** the POMs declare Apache-2.0 but the repo carries no `LICENSE` file yet. Add one (or
-> change the POM declarations) before publishing.
+## Licensing
+
+Tether is licensed under the **GNU General Public License v3** (`LICENSE`).
+
+That follows from what it links rather than from a preference. `tether-core` depends on
+`org.whispersystems:signal-protocol-java` and `curve25519-java`, both GPLv3. They are not in this
+tree, but they are linked into any application built against Tether, so the distributed
+combination carries GPLv3 obligations regardless of what this project called itself. Upgrading
+does not avoid it — the modern `org.signal:libsignal-client` is AGPLv3, which is stricter.
+
+**This is not LGPL.** An app that links Tether must itself be distributable under GPLv3. If that
+does not suit your use, the blocker is the Signal libraries, not this project, and it would need a
+Signal implementation under different terms.
+
+The protocol layers are a port of [whatsmeow](https://github.com/tulir/whatsmeow) (MPL-2.0), and
+`WAProto.proto` is vendored from it. MPL-2.0 § 3.3 allows a Larger Work to be distributed under a
+Secondary License, and § 1.12 names the GNU GPL among them, so the ported code may be conveyed
+under GPLv3 as long as the MPL's terms are still met for those files. `NOTICE` carries the
+attribution that does so.

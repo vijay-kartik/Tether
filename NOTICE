@@ -1,0 +1,34 @@
+Tether
+Copyright (C) 2026 Kartik Vijayvergiya
+
+This program is free software: you can redistribute it and/or modify it under the
+terms of the GNU General Public License as published by the Free Software Foundation,
+either version 3 of the License, or (at your option) any later version. See LICENSE.
+
+Why GPLv3
+---------
+Tether links org.whispersystems:signal-protocol-java and org.whispersystems:curve25519-java,
+both of which are GPLv3. They are not distributed with this source tree, but they are
+resolved at build time and linked into any application built against Tether, so the
+distributed combination carries GPLv3 obligations. Licensing Tether itself under GPLv3
+states that plainly instead of leaving a consumer to discover it from a transitive
+dependency.
+
+Upstream work
+-------------
+The protocol layers under tether-core (transport framing, the Noise handshake, the
+binary-XML codec and its token dictionaries, ADV pairing, and the media key derivation)
+are a Kotlin port of whatsmeow (https://github.com/tulir/whatsmeow), and
+tether-core/src/main/proto/WAProto.proto is vendored from the same project. whatsmeow is
+licensed under the Mozilla Public License 2.0.
+
+MPL-2.0 permits distribution of a Larger Work under a Secondary License, and section 1.12
+names the GNU GPL among those, so the ported code may be conveyed under GPLv3 provided the
+MPL's own terms continue to be met for the covered files. This attribution is part of
+meeting them.
+
+Consuming Tether
+----------------
+GPLv3 is not LGPL: an application that links Tether must itself be distributable under
+GPLv3. That constraint comes from the Signal libraries above, not from a choice to be
+restrictive, and it would apply through them whatever licence this project chose.
