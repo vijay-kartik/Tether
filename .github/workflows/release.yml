@@ -1,0 +1,82 @@
+name: Release
+
+on:
+  push:
+    tags: [ 'v*' ]
+  workflow_dispatch:
+    inputs:
+      central:
+        description: "Also stage to Maven Central (needs the Central and signing secrets)"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    name: Publish ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up JDK 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Set up Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Install SDK platforms
+        run: |
+          yes | sdkmanager "platforms;android-37.0" "build-tools;35.0.0" >/dev/null
+
+      - name: Set up Gradle
+        uses: gradle/actions/setup-gradle@v4
+
+      # A tag and the version the artifacts actually carry can disagree, and the coordinates win.
+      # Catching that here beats publishing 0.1.0 under a v0.2.0 tag, which cannot be undone on
+      # Central and is confusing everywhere else.
+      - name: Check the tag matches tether.version
+        if: startsWith(github.ref, 'refs/tags/v')
+        run: |
+          version=$(grep '^tether.version=' gradle.properties | cut -d= -f2)
+          tag="${GITHUB_REF_NAME#v}"
+          if [ "$version" != "$tag" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match tether.version=$version"
+            exit 1
+          fi
+          echo "publishing $version"
+
+      - name: Build and test
+        run: ./gradlew :tether-core:assembleRelease :tether-ui:assembleRelease test --stacktrace
+
+      - name: Publish to GitHub Packages
+        run: ./gradlew publishAllPublicationsToGitHubPackagesRepository --stacktrace
+        env:
+          GITHUB_ACTOR: ${{ github.actor }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      # Only when the account is actually set up: Central needs a verified namespace, a published
+      # signing key, and Portal credentials, none of which the built-in token provides.
+      - name: Stage to Maven Central
+        if: ${{ (github.event_name == 'push' || inputs.central) && secrets.CENTRAL_USERNAME != '' }}
+        run: ./gradlew publishAllPublicationsToCentralPortalRepository --stacktrace
+        env:
+          CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
+          CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
+          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+          SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: tether-${{ github.ref_name }}
+          path: |
+            tether-core/build/outputs/aar/*.aar
+            tether-ui/build/outputs/aar/*.aar
+          if-no-files-found: error

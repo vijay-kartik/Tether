@@ -23,7 +23,11 @@ android {
     }
 
     publishing {
-        singleVariant("release") { withSourcesJar() }
+        singleVariant("release") {
+            withSourcesJar()
+            // Central rejects a publication without one.
+            withJavadocJar()
+        }
     }
 }
 
@@ -53,53 +57,10 @@ dependencies {
     implementation(libs.zxing.core)
 }
 
-// Wrapped in afterEvaluate because the Android `release` software component only exists once
-// AGP has finished configuring its variants.
-afterEvaluate {
-    publishing {
-        publications {
-            create<MavenPublication>("release") {
-                from(components["release"])
-                groupId = "space.pitchstone"
-                artifactId = "tether-ui"
-                version = providers.gradleProperty("tether.version").get()
-
-                pom {
-                    name.set("Tether UI")
-                    description.set("Optional Compose surface for Tether: QR pairing, connection status and an observed-message list.")
-                    url.set("https://github.com/vijay-kartik/Tether")
-                    // GPLv3, matching the libsignal/curve25519 libraries this links: their
-                    // terms reach any app built against Tether, so advertising anything more
-                    // permissive here would misstate a consumer's obligations. See NOTICE.
-                    licenses {
-                        license {
-                            name.set("GNU General Public License, Version 3")
-                            url.set("https://www.gnu.org/licenses/gpl-3.0.txt")
-                        }
-                    }
-                    developers {
-                        developer {
-                            id.set("vijay-kartik")
-                            name.set("Kartik Vijayvergiya")
-                        }
-                    }
-                    scm {
-                        url.set("https://github.com/vijay-kartik/Tether")
-                        connection.set("scm:git:https://github.com/vijay-kartik/Tether.git")
-                        developerConnection.set("scm:git:ssh://git@github.com/vijay-kartik/Tether.git")
-                    }
-                }
-            }
-        }
-        repositories {
-            maven {
-                name = "GitHubPackages"
-                url = uri("https://maven.pkg.github.com/vijay-kartik/Tether")
-                credentials {
-                    username = providers.gradleProperty("gpr.user").orNull ?: System.getenv("GITHUB_ACTOR")
-                    password = providers.gradleProperty("gpr.key").orNull ?: System.getenv("GITHUB_TOKEN")
-                }
-            }
-        }
-    }
-}
+// Coordinates, POM, signing and repositories are shared with the other artifact; only these three
+// differ. See gradle/publishing.gradle.kts.
+extra["artifactName"] = "tether-ui"
+extra["pomName"] = "Tether UI"
+extra["pomDescription"] =
+    "Optional Compose surface for Tether: QR pairing, connection status and an observed-message list."
+apply(from = rootProject.file("gradle/publishing.gradle.kts"))
