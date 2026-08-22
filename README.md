@@ -143,12 +143,52 @@ AGP 9's new DSL. So `gradle.properties` sets `android.builtInKotlin=false` and
 
 ## Publishing
 
-Both artifacts publish to GitHub Packages, versioned by `tether.version` in `gradle.properties`
-so they never drift apart. Put credentials in `~/.gradle/gradle.properties` (`gpr.user` /
-`gpr.key`, token needs `write:packages`) or set `GITHUB_ACTOR` / `GITHUB_TOKEN`:
+Version comes from `tether.version` in `gradle.properties` — one source of truth, so the two
+artifacts can never drift apart. Tagging `v<version>` runs the release workflow; it refuses to
+publish if the tag and that property disagree, since the coordinates are what consumers get and a
+mismatch cannot be undone on Central.
 
 ```
-./gradlew publishAllPublicationsToGitHubPackagesRepository
+git tag v0.1.0 && git push origin v0.1.0
+```
+
+### GitHub Packages
+
+Works with nothing but the built-in Actions token. Consumers need a GitHub personal access token
+with `read:packages` even for public packages — that is a GitHub Packages requirement, not a
+choice made here:
+
+```kotlin
+repositories {
+    maven {
+        url = uri("https://maven.pkg.github.com/vijay-kartik/Tether")
+        credentials {
+            username = providers.gradleProperty("gpr.user").get()
+            password = providers.gradleProperty("gpr.key").get()
+        }
+    }
+}
+```
+
+### Maven Central
+
+Configured but **not yet enabled** — it stays skipped until the repository secrets exist. Three
+things are needed first, none of which can be done from the build:
+
+1. A [Central Portal](https://central.sonatype.com) account, with the `space.pitchstone` namespace
+   verified by proving control of `pitchstone.space` (a DNS TXT record).
+2. A GPG key whose public half is published to a keyserver.
+3. Repository secrets: `CENTRAL_USERNAME`, `CENTRAL_PASSWORD` (a Portal *user token*, not the
+   account password), `SIGNING_KEY` (the ASCII-armoured private key), `SIGNING_PASSWORD`.
+
+Signing turns itself on only when `SIGNING_KEY` is present, so local publishing and GitHub
+Packages releases work without a key. A Central deploy lands in a staging repository and is
+released from the Portal — uploading does not make it live.
+
+To publish locally:
+
+```
+./gradlew publishToMavenLocal
 ```
 
 ## Licensing
