@@ -5,10 +5,14 @@ on:
     tags: [ 'v*' ]
   workflow_dispatch:
     inputs:
-      central:
-        description: "Also stage to Maven Central (needs the Central and signing secrets)"
+      githubPackages:
+        description: "Publish to GitHub Packages (fails if this version is already published there)"
         type: boolean
         default: false
+      central:
+        description: "Stage to Maven Central (needs the Central and signing secrets)"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -63,7 +67,11 @@ jobs:
       - name: Build and test
         run: ./gradlew :tether-core:assembleRelease :tether-ui:assembleRelease test --stacktrace
 
+      # A tag publishes everywhere; a manual run publishes only what was asked for. Versions on
+      # GitHub Packages are immutable, so re-running a release to reach Central would otherwise
+      # 409 here and never get there.
       - name: Publish to GitHub Packages
+        if: ${{ github.event_name == 'push' || inputs.githubPackages }}
         run: ./gradlew publishAllPublicationsToGitHubPackagesRepository --stacktrace
         env:
           GITHUB_ACTOR: ${{ github.actor }}
