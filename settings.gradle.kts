@@ -24,4 +24,6 @@ dependencyResolutionManagement {
 
 rootProject.name = "Tether"
 include(":app")
+include(":tether-core")
+include(":tether-ui")
  
