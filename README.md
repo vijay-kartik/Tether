@@ -41,6 +41,11 @@ val manager = WhatsAppManager(
 setContent { WhatsAppScreen(manager) }
 ```
 
+`WhatsAppManager.Config` carries the host-tunable knobs — `databaseName`, `logTag`,
+`notificationTitle`, and `deviceName`, the name the user sees for this device in WhatsApp's
+**Linked Devices** list (default `"Tether"`). `deviceName` travels in the pairing payload only,
+so it is fixed when the device is linked; changing it takes effect on the next pairing.
+
 `:tether-core` contributes its own `INTERNET`, `FOREGROUND_SERVICE`,
 `FOREGROUND_SERVICE_DATA_SYNC` and `POST_NOTIFICATIONS` permissions plus the foreground service
 via manifest merging — a consumer declares nothing. On API 33+ the host app still has to *request*

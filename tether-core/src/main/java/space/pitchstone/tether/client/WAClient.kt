@@ -53,6 +53,8 @@ internal class WAClient(
     private val credentialStore: CredentialStore,
     private val keyValueStore: KeyValueStore,
     private val listener: Listener,
+    /** Shown in the user's WhatsApp Linked Devices list; only read when pairing. */
+    private val deviceName: String,
     private val transportFactory: () -> OkHttpFrameTransport = { OkHttpFrameTransport() },
 ) {
     interface Listener {
@@ -108,7 +110,7 @@ internal class WAClient(
         val payload = credentials.deviceJid?.let { jid ->
             val (user, device) = parseJid(jid)
             ClientPayloadFactory.login(user, device)
-        } ?: ClientPayloadFactory.registration(credentials)
+        } ?: ClientPayloadFactory.registration(credentials, deviceName)
 
         Log.i(TAG, "connecting (${if (credentials.deviceJid != null) "login" else "register"})")
         noise = NoiseHandshake(WaCertVerifier).perform(t, credentials.noiseKey, payload)
