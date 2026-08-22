@@ -127,11 +127,30 @@ socket. Incoming batches go through a buffered `Channel` consumed by a single wo
 The SDK never interprets message meaning — that stays in the host app, behind the
 callback.
 
-### 7. `:tether-ui`
+### 7. Media — `media/`
 
-A single Compose screen: QR display with ref rotation, connection status, observed-message
-list, and logout. It takes a `WhatsAppManager` and nothing else — no DI container, no host
-app types.
+Attachments do not travel over the Signal session; only a 32-byte `mediaKey` does, and the file
+itself sits on WhatsApp's CDN. `MediaCrypto` expands that key (HKDF, 112 bytes, a per-type info
+string) into iv/cipherKey/macKey, then verifies the downloaded blob's SHA-256, checks a truncated
+HMAC over `iv || ciphertext` in constant time, AES-256-CBC decrypts, and checks the plaintext
+hash. Bytes that fail any check are never returned. The MAC is verified *before* decrypting —
+otherwise the server would have a padding oracle.
+
+Downloads are plain HTTPS off the socket (`MediaDownloader`), so one can never stall the read
+loop, and they carry the web client's `Origin`/`Referer` because the CDN checks who is asking.
+`MediaInfo` describes an attachment for display — including the `jpegThumbnail` carried inside the
+message, which costs no network at all — while the download key stays inside the SDK, held by
+message id. `MediaFiles` writes decrypted files under `cacheDir` and serves them through a
+`FileProvider` the SDK declares itself, so a host can open one without standing up a provider.
+
+Sender-supplied filenames are sanitised before they are used as paths: the name is chosen by
+whoever sent the message.
+
+### 8. `:tether-ui`
+
+A single Compose screen: QR display with ref rotation, connection status, a Personal/Groups
+message list with inline images and openable file rows, reconnect, and logout. It takes a
+`WhatsAppManager` and nothing else — no DI container, no host app types.
 
 ## How hard was this?
 
@@ -147,17 +166,38 @@ is attempted).
 
 Roughly in priority order:
 
-- [ ] **Sending messages** — the biggest gap: the client is currently receive-only.
+- [ ] **Sending messages** — the biggest gap: the client is still receive-only.
       Needs the encrypt side of Signal: fetch recipients' pre-keys, encrypt per-device,
-      sender-key distribution for groups.
-- [x] **Server cert verification** — *done.* `WaCertVerifier` implements the full
-      whatsmeow check (pinned-key signature on the intermediate, issuer serial, leaf
-      signature, leaf key vs. the decrypted server static) and `WAClient` passes it to the
-      handshake. Only `NoiseHandshake`'s default parameter is still `CertVerifier.Noop`,
-      and nothing in the SDK uses that default.
-- [ ] **Media** — download + decrypt of images, voice notes, documents (media has its
-      own encryption keys plus a CDN download flow).
-- [ ] **History sync** — currently only messages arriving while connected are seen;
-      no import of existing chats.
-- [ ] **Smaller items** — presence/read receipts beyond delivery acks, contact and
-      group metadata, app-state sync (archived, pinned, muted, etc.).
+      sender-key distribution for groups, and the outgoing `<message>` node. Also the first
+      feature whose bugs are visible to other people, which is worth weighing against the
+      state of the test suite below.
+- [ ] **History sync** — only messages arriving while connected are seen; no import of
+      existing chats.
+- [ ] **Tests and static analysis** — there are none. CI runs `./gradlew test` against zero
+      test sources, and no lint or detekt is configured. The pure layers need neither a network
+      nor a device to test: the binary codec is a `marshal`/`unmarshal` pair that round-trips,
+      media decryption is known-answer testable against a real captured blob, and `ChatType`,
+      `Jid` parsing and the reconnect backoff are plain logic. A dead-code check would have
+      caught a shipped bug where a composable was written but never called.
+- [ ] **Remaining media** — video and audio are described, downloadable and openable in another
+      app, but not played inline. `documentMessage.pageCount` is parsed but not surfaced.
+- [ ] **Group subject changes** — a subject learned once is never updated; that wants the
+      `w:gp2` notification.
+- [ ] **Smaller items** — presence and read receipts beyond delivery acks, contact metadata,
+      app-state sync (archived, pinned, muted).
+
+### Done
+
+- [x] **Server cert verification** — `WaCertVerifier` implements the full whatsmeow check
+      (pinned-key signature on the intermediate, issuer serial, leaf signature, leaf key vs. the
+      decrypted server static) and `WAClient` passes it to the handshake. Only `NoiseHandshake`'s
+      default parameter is still `CertVerifier.Noop`, and nothing in the SDK uses that default.
+- [x] **Reconnect** — an idle socket gets reaped and arrives as a TLS `close_notify`; the client
+      redials rather than treating it as terminal. Backoff 1s → 60s, reset on a session that
+      reached `success`, woken early by returning connectivity.
+- [x] **Conversation context** — `chatType` (direct/group/broadcast/newsletter), the group's
+      subject via a `w:g2` query, and the sender's push name from `notify`.
+- [x] **Media: images** — inline `jpegThumbnail` previews with no network, captions surfaced as
+      the message's text, and full-resolution download with decryption.
+- [x] **Media: documents** — sanitised filenames, on-disk caching under `cacheDir`, and opening
+      in an external viewer through the SDK's own `FileProvider`.
