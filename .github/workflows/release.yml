@@ -18,6 +18,14 @@ jobs:
   publish:
     name: Publish ${{ github.ref_name }}
     runs-on: ubuntu-latest
+    # Hoisted to the job because the Central step needs to test whether these are set. The
+    # `secrets` context is not available in a step-level `if` at all, and a step's own `env` is
+    # not visible to its own `if` either — job-level `env` is the one place both work.
+    env:
+      CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
+      CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
+      SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
+      SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -64,13 +72,8 @@ jobs:
       # Only when the account is actually set up: Central needs a verified namespace, a published
       # signing key, and Portal credentials, none of which the built-in token provides.
       - name: Stage to Maven Central
-        if: ${{ (github.event_name == 'push' || inputs.central) && secrets.CENTRAL_USERNAME != '' }}
+        if: ${{ (github.event_name == 'push' || inputs.central) && env.CENTRAL_USERNAME != '' }}
         run: ./gradlew publishAllPublicationsToCentralPortalRepository --stacktrace
-        env:
-          CENTRAL_USERNAME: ${{ secrets.CENTRAL_USERNAME }}
-          CENTRAL_PASSWORD: ${{ secrets.CENTRAL_PASSWORD }}
-          SIGNING_KEY: ${{ secrets.SIGNING_KEY }}
-          SIGNING_PASSWORD: ${{ secrets.SIGNING_PASSWORD }}
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v4

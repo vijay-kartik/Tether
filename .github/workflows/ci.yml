@@ -14,6 +14,19 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # A workflow with an invalid expression is rejected at validation time: the run fails instantly
+  # with no job and no log, which is how a broken release workflow reached a tag unnoticed.
+  # Linting them here turns that into a failed PR check instead.
+  workflows:
+    name: Lint workflows
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: actionlint
+        uses: docker://rhysd/actionlint:1.7.7
+        with:
+          args: -color
+
   build:
     name: Build SDK & sample app
     runs-on: ubuntu-latest
