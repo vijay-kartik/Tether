@@ -5,7 +5,7 @@ import space.pitchstone.tether.crypto.KeyPair25519
 import java.security.SecureRandom
 
 /** A signed pre-key: a Curve25519 key pair plus an XEdDSA signature by the identity key. */
-data class SignedPreKey(
+internal data class SignedPreKey(
     val keyId: Int,
     val keyPair: KeyPair25519,
     /** XEdDSA signature over (0x05 || publicKey) by the identity key. */
@@ -25,7 +25,7 @@ data class SignedPreKey(
  *
  * Post-pairing (filled after `pair-success`): [deviceJid], [accountSignedDeviceIdentity], [pushName].
  */
-data class DeviceCredentials(
+internal data class DeviceCredentials(
     val noiseKey: KeyPair25519,
     val identityKey: KeyPair25519,
     val signedPreKey: SignedPreKey,

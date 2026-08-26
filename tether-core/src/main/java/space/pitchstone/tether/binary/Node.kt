@@ -4,7 +4,7 @@ package space.pitchstone.tether.binary
  * A node in WhatsApp's binary-XML. [attrs] values are String or [Jid]; [content] is null,
  * a `List<Node>`, a `ByteArray`, or a String.
  */
-data class Node(
+internal data class Node(
     val tag: String,
     val attrs: Map<String, Any?> = emptyMap(),
     val content: Any? = null,

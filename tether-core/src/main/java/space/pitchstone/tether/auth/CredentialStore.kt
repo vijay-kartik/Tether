@@ -6,7 +6,7 @@ package space.pitchstone.tether.auth
  * in the app layer; keeping this an interface lets the protocol code stay storage-agnostic and
  * unit-testable with an in-memory fake.
  */
-interface CredentialStore {
+internal interface CredentialStore {
     suspend fun load(): DeviceCredentials?
     suspend fun save(credentials: DeviceCredentials)
     suspend fun clear()

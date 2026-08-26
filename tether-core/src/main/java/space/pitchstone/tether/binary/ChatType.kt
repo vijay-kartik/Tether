@@ -26,7 +26,7 @@ enum class ChatType {
     OTHER;
 
     companion object {
-        fun of(chat: Jid): ChatType = when (chat.server) {
+        internal fun of(chat: Jid): ChatType = when (chat.server) {
             Jid.DEFAULT_USER_SERVER, Jid.HIDDEN_USER_SERVER, Jid.HOSTED_SERVER -> DIRECT
             Jid.GROUP_SERVER -> GROUP
             Jid.BROADCAST_SERVER -> BROADCAST

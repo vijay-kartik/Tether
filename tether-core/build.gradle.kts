@@ -59,7 +59,7 @@ dependencies {
     api(libs.kotlinx.coroutines.core)
 
     // NotificationCompat, for the foreground service that keeps the connection alive.
-    implementation(libs.androidx.core.ktx)
+    implementation(libs.androidx.core)
 
     implementation(libs.okhttp)
     implementation(libs.bouncycastle)
@@ -69,7 +69,6 @@ dependencies {
 
     // Session/persistence (WhatsAppManager, credential + Signal-store persistence)
     implementation(libs.androidx.room.runtime)
-    implementation(libs.androidx.room.ktx)
     ksp(libs.androidx.room.compiler)
 
     testImplementation(libs.junit.jupiter)

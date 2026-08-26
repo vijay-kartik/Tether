@@ -11,7 +11,7 @@ import java.util.zip.Inflater
  * uncompressed-flags byte (so it can be sent directly); [unmarshal] strips that byte and
  * zlib-inflates if the flag bit is set.
  */
-object WaBinary {
+internal object WaBinary {
 
     fun marshal(node: Node): ByteArray = BinaryEncoder().apply { writeNode(node) }.toByteArray()
 

@@ -10,7 +10,7 @@ import org.whispersystems.curve25519.Curve25519 as WhisperCurve25519
  * Note WhatsApp signs a public key as `0x05 || pub` (the DJB type byte prefix) — see
  * [space.pitchstone.tether.auth.DeviceCredentials].
  */
-object Curve25519 {
+internal object Curve25519 {
     /** The Signal/WhatsApp "DJB" curve type byte prefixed before a public key when signing. */
     const val DJB_TYPE: Byte = 0x05
 

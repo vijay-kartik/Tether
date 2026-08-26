@@ -6,7 +6,7 @@ package space.pitchstone.tether.store
  * call it off the main thread. The app provides a Room-backed implementation; `:wa` stays
  * storage-agnostic and unit-testable with an in-memory fake.
  */
-interface KeyValueStore {
+internal interface KeyValueStore {
     fun get(namespace: String, key: String): ByteArray?
     fun put(namespace: String, key: String, value: ByteArray)
     fun delete(namespace: String, key: String)

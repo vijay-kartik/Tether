@@ -21,10 +21,10 @@ import space.pitchstone.tether.store.KeyValueStore
 // --- Entities ---
 
 @Entity(tableName = "wa_kv", primaryKeys = ["namespace", "name"])
-data class WaKvEntity(val namespace: String, val name: String, val value: ByteArray)
+internal data class WaKvEntity(val namespace: String, val name: String, val value: ByteArray)
 
 @Entity(tableName = "wa_credentials")
-data class WaCredentialsEntity(
+internal data class WaCredentialsEntity(
     @PrimaryKey val id: Int = 0,
     val noisePriv: ByteArray, val noisePub: ByteArray,
     val identityPriv: ByteArray, val identityPub: ByteArray,
@@ -34,7 +34,7 @@ data class WaCredentialsEntity(
 )
 
 @Entity(tableName = "wa_messages", primaryKeys = ["id"])
-data class WaMessageEntity(
+internal data class WaMessageEntity(
     val id: String,
     /** The [WaConversationEntity] this message was assigned to — see [WhatsAppManager.Received.conversationId]. */
     val conversationId: String,
@@ -59,7 +59,7 @@ data class WaMessageEntity(
  * Mirrors [WhatsAppManager.Conversation]; see there for what a conversation means.
  */
 @Entity(tableName = "wa_conversations")
-data class WaConversationEntity(
+internal data class WaConversationEntity(
     @PrimaryKey val id: String,
     /** The chatroom this happened in: a DM peer's JID or a group's JID. */
     val chatJid: String,
@@ -76,7 +76,7 @@ internal const val PARTICIPANT_DELIMITER = "|"
 // --- DAOs ---
 
 @Dao
-interface WaKvDao {
+internal interface WaKvDao {
     @Query("SELECT value FROM wa_kv WHERE namespace = :ns AND name = :name")
     fun get(ns: String, name: String): ByteArray?
 
@@ -97,7 +97,7 @@ interface WaKvDao {
 }
 
 @Dao
-interface WaCredentialsDao {
+internal interface WaCredentialsDao {
     @Query("SELECT * FROM wa_credentials WHERE id = 0")
     suspend fun get(): WaCredentialsEntity?
 
@@ -109,7 +109,7 @@ interface WaCredentialsDao {
 }
 
 @Dao
-interface WaMessageDao {
+internal interface WaMessageDao {
     @Upsert
     suspend fun upsert(entity: WaMessageEntity)
 
@@ -133,7 +133,7 @@ interface WaMessageDao {
 }
 
 @Dao
-interface WaConversationDao {
+internal interface WaConversationDao {
     @Upsert
     suspend fun upsert(entity: WaConversationEntity)
 
@@ -161,7 +161,7 @@ interface WaConversationDao {
     version = 2,
     exportSchema = false,
 )
-abstract class WaDatabase : RoomDatabase() {
+internal abstract class WaDatabase : RoomDatabase() {
     abstract fun kvDao(): WaKvDao
     abstract fun credentialsDao(): WaCredentialsDao
     abstract fun messageDao(): WaMessageDao
@@ -175,7 +175,7 @@ abstract class WaDatabase : RoomDatabase() {
  * losing cached history costs nothing a reconnect won't eventually refill. Credentials and the
  * Signal key store live in separate tables and are untouched: this is not a fresh pairing.
  */
-val WA_MIGRATION_1_2: Migration = object : Migration(1, 2) {
+internal val WA_MIGRATION_1_2: Migration = object : Migration(1, 2) {
     override fun migrate(db: SupportSQLiteDatabase) {
         db.execSQL("DROP TABLE IF EXISTS wa_messages")
         db.execSQL(
@@ -206,7 +206,7 @@ val WA_MIGRATION_1_2: Migration = object : Migration(1, 2) {
 
 // --- Store implementations (the SPIs that WAClient depends on) ---
 
-class RoomKeyValueStore(private val dao: WaKvDao) : KeyValueStore {
+internal class RoomKeyValueStore(private val dao: WaKvDao) : KeyValueStore {
     override fun get(namespace: String, key: String): ByteArray? = dao.get(namespace, key)
     override fun put(namespace: String, key: String, value: ByteArray) = dao.put(WaKvEntity(namespace, key, value))
     override fun delete(namespace: String, key: String) = dao.delete(namespace, key)
@@ -215,7 +215,7 @@ class RoomKeyValueStore(private val dao: WaKvDao) : KeyValueStore {
     override fun clearAll() = dao.clearAll()
 }
 
-class RoomCredentialStore(private val dao: WaCredentialsDao) : CredentialStore {
+internal class RoomCredentialStore(private val dao: WaCredentialsDao) : CredentialStore {
     override suspend fun load(): DeviceCredentials? = dao.get()?.toDomain()
     override suspend fun save(credentials: DeviceCredentials) = dao.upsert(credentials.toEntity())
     override suspend fun clear() = dao.clear()
@@ -323,7 +323,7 @@ private fun mediaFromJson(json: String): MediaInfo? = runCatching {
     )
 }.getOrNull()
 
-class RoomMessageStore(private val dao: WaMessageDao) {
+internal class RoomMessageStore(private val dao: WaMessageDao) {
     suspend fun saveBatch(messages: List<WhatsAppManager.Received>) {
         messages.forEach { dao.upsert(it.toEntity()) }
     }
@@ -348,9 +348,9 @@ class RoomMessageStore(private val dao: WaMessageDao) {
  * A chat's still-open conversation as loaded from storage — just enough for [ConversationTracker]
  * to decide whether the next message extends it or starts a new one.
  */
-data class OpenConversation(val id: String, val startTime: Long, val endTime: Long, val participants: Set<String>)
+internal data class OpenConversation(val id: String, val startTime: Long, val endTime: Long, val participants: Set<String>)
 
-class RoomConversationStore(private val dao: WaConversationDao) {
+internal class RoomConversationStore(private val dao: WaConversationDao) {
     suspend fun upsert(
         id: String,
         chatJid: String,

@@ -4,7 +4,7 @@ package space.pitchstone.tether.binary
  * A WhatsApp JID. For ingestion we mostly care about [user] (the phone number for
  * s.whatsapp.net JIDs) and [server]; [device]/[agent]/[integrator] are kept for fidelity.
  */
-data class Jid(
+internal data class Jid(
     val user: String,
     val server: String,
     val device: Int = 0,

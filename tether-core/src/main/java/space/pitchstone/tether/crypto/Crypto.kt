@@ -20,7 +20,7 @@ import javax.crypto.spec.SecretKeySpec
  */
 
 /** A Curve25519 (X25519) key pair as raw 32-byte values. */
-data class KeyPair25519(val privateKey: ByteArray, val publicKey: ByteArray) {
+internal data class KeyPair25519(val privateKey: ByteArray, val publicKey: ByteArray) {
     init {
         require(privateKey.size == X25519.KEY_SIZE) { "private key must be 32 bytes" }
         require(publicKey.size == X25519.KEY_SIZE) { "public key must be 32 bytes" }
@@ -35,7 +35,7 @@ data class KeyPair25519(val privateKey: ByteArray, val publicKey: ByteArray) {
 }
 
 /** Curve25519 key generation and Diffie–Hellman (the `DH()` used throughout Noise). */
-object X25519 {
+internal object X25519 {
     const val KEY_SIZE = 32
     private val random = SecureRandom()
 
@@ -66,7 +66,7 @@ object X25519 {
 }
 
 /** AES-256-GCM (Noise cipher function). Tag is 16 bytes, appended to the ciphertext. */
-object Aead {
+internal object Aead {
     private const val TAG_BITS = 128
 
     fun encrypt(key: ByteArray, nonce: ByteArray, associatedData: ByteArray, plaintext: ByteArray): ByteArray {
@@ -90,7 +90,7 @@ object Aead {
 }
 
 /** HKDF over HMAC-SHA256 (RFC 5869) — the Noise `HKDF()` and key-derivation helper. */
-object Hkdf {
+internal object Hkdf {
     private const val HASH_LEN = 32
 
     fun extract(salt: ByteArray, ikm: ByteArray): ByteArray {
@@ -130,6 +130,6 @@ object Hkdf {
         }
 }
 
-object Sha256 {
+internal object Sha256 {
     fun hash(data: ByteArray): ByteArray = MessageDigest.getInstance("SHA-256").digest(data)
 }
