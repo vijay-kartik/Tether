@@ -82,6 +82,12 @@ class WhatsAppManager(
      */
     data class Received(
         val id: String,
+        /**
+         * The [Conversation] this message was assigned to at ingestion — see [ConversationTracker].
+         * Stable once assigned: later messages in the same exchange share it, and it is what
+         * [groupIntoConversations] groups on.
+         */
+        val conversationId: String,
         /** The other party in the chat: who sent it, or who we sent it to. */
         val phone: String?,
         /** Message body, or null when the payload carries no text (media, reactions, …). */
@@ -123,6 +129,33 @@ class WhatsAppManager(
     /** A host app's opaque note on a [Received] message — this module attaches no meaning to it. */
     data class Annotation(val label: String, val isError: Boolean = false)
 
+    /**
+     * A run of consecutive messages in one chatroom with less than 10 minutes between any two of
+     * them, assigned at ingestion by [ConversationTracker] and persisted — [id] is stable, so a
+     * conversation is the same conversation across restarts, not something recomputed from
+     * whatever happens to be in [State.recent] at display time.
+     */
+    data class Conversation(
+        val id: String,
+        /** The chatroom this happened in: a DM peer's JID, or a group's JID. */
+        val chatJid: String,
+        val chatType: ChatType,
+        val chatName: String?,
+        /** Everyone who actually sent a message in this exchange — two for a DM, more for a group. */
+        val participants: List<Participant>,
+        val messages: List<Received>,
+        val startTime: Long = messages.firstOrNull()?.timestampMillis ?: 0,
+        val endTime: Long = messages.lastOrNull()?.timestampMillis ?: 0,
+    )
+
+    /** One participant in a [Conversation], derived from the messages they sent in it. */
+    data class Participant(
+        val jid: String,
+        val phone: String?,
+        val name: String?,
+        val isSelf: Boolean,
+    )
+
     data class State(
         val status: String = "Not connected",
         val qrCodes: List<String> = emptyList(),
@@ -150,12 +183,17 @@ class WhatsAppManager(
     // Lazy so constructing the manager stays free of I/O — the database is not touched until
     // something actually needs it, which keeps construction cheap and testable.
     private val dbDelegate = lazy {
-        Room.databaseBuilder(appContext, WaDatabase::class.java, config.databaseName).build()
+        Room.databaseBuilder(appContext, WaDatabase::class.java, config.databaseName)
+            .addMigrations(WA_MIGRATION_1_2)
+            .build()
     }
     private val db by dbDelegate
     private val keyValueStore by lazy { RoomKeyValueStore(db.kvDao()) }
     private val names by lazy { ChatNames(keyValueStore) }
     private val credentialStore by lazy { RoomCredentialStore(db.credentialsDao()) }
+    private val messageStore by lazy { RoomMessageStore(db.messageDao()) }
+    private val conversationStore by lazy { RoomConversationStore(db.conversationDao()) }
+    private val conversationTracker by lazy { ConversationTracker(conversationStore) }
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private val _state = MutableStateFlow(State())
@@ -168,6 +206,8 @@ class WhatsAppManager(
         scope.launch {
             for (batch in deliveries) {
                 runCatching {
+                    // Persist messages to database
+                    messageStore.saveBatch(batch)
                     onMessages(batch)
                 }.onFailure { Log.w(config.logTag, "host onMessages threw", it) }
             }
@@ -193,6 +233,8 @@ class WhatsAppManager(
         // stay visible until login actually completes.
         scope.launch {
             val jid = runCatching { credentialStore.load()?.deviceJid }.getOrNull()
+            // Load persisted messages on startup
+            val persistedMessages = runCatching { messageStore.loadAll() }.getOrNull() ?: emptyList()
             _state.update {
                 it.copy(
                     initializing = false,
@@ -200,6 +242,7 @@ class WhatsAppManager(
                     deviceJid = jid,
                     onboardingDone = it.onboardingDone || jid != null,
                     status = if (jid != null) "Linked" else it.status,
+                    recent = persistedMessages.take(MAX_RECENT),
                 )
             }
             if (jid != null) runCatching { connect() }
@@ -312,6 +355,40 @@ class WhatsAppManager(
     /** Attach [annotation] to the message [id], e.g. what a host app's pipeline decided about it. */
     fun annotate(id: String, annotation: Annotation) {
         _state.update { st -> st.copy(recent = st.recent.map { if (it.id == id) it.copy(annotation = annotation) else it }) }
+    }
+
+    /** Clear all persisted messages and conversations from the database. */
+    fun clearAllMessages() {
+        scope.launch {
+            runCatching {
+                messageStore.clearAll()
+                conversationStore.clearAll()
+            }
+                .onSuccess {
+                    // Otherwise the next message would extend an in-memory conversation whose row
+                    // no longer exists.
+                    conversationTracker.forgetAll()
+                    _state.update { it.copy(recent = emptyList()) }
+                }
+                .onFailure { Log.w(config.logTag, "failed to clear messages", it) }
+        }
+    }
+
+    /** Clear messages and conversations from a specific chat. */
+    fun clearChat(chatJid: String) {
+        scope.launch {
+            runCatching {
+                messageStore.clearChat(chatJid)
+                conversationStore.clearChat(chatJid)
+            }
+                .onSuccess {
+                    conversationTracker.forget(chatJid)
+                    _state.update { st ->
+                        st.copy(recent = st.recent.filter { it.chatJid != chatJid })
+                    }
+                }
+                .onFailure { Log.w(config.logTag, "failed to clear chat $chatJid", it) }
+        }
     }
 
     /**
@@ -440,29 +517,42 @@ class WhatsAppManager(
         minOf(RETRY_BASE_MS shl (attempt.coerceIn(1, RETRY_MAX_SHIFT) - 1), RETRY_CAP_MS)
 
     /**
-     * Map a decrypted result to the public [Received] shape, dropping device-to-device plumbing.
-     * Returns null for anything a caller should never see, so the protocol-traffic rule lives in
-     * one place instead of being re-implemented by every consumer.
+     * Map a decrypted result to the public [Received] shape, dropping device-to-device plumbing,
+     * and assign it to a conversation via [conversationTracker]. Returns null for anything a
+     * caller should never see, so the protocol-traffic rule lives in one place instead of being
+     * re-implemented by every consumer.
      */
-    private fun toReceived(result: MessageDecryptor.Result): Received? {
+    private suspend fun toReceived(result: MessageDecryptor.Result): Received? {
         if (MessageDecryptor.isProtocolTraffic(result)) {
             Log.i(config.logTag, "id=${result.id} is protocol traffic (category=${result.category}), not surfaced")
             return null
         }
         result.mediaRef?.let { mediaRefs[result.id] = it }
+        val chatType = result.chatType
+        val chatJid = result.chat.toString()
+        val senderJid = result.sender.toString()
+        val chatName = if (chatType == ChatType.GROUP) names.groupSubject(result.chat) else null
+        val conversationId = conversationTracker.resolve(
+            chatJid = chatJid,
+            chatType = chatType,
+            chatName = chatName,
+            senderJid = senderJid,
+            timestampMillis = result.timestampMillis,
+        )
         return Received(
             id = result.id,
+            conversationId = conversationId,
             phone = if (result.fromMe) result.recipientPhone else result.senderPhone,
-            chatType = result.chatType,
+            chatType = chatType,
             media = result.media,
-            chatName = if (result.chatType == ChatType.GROUP) names.groupSubject(result.chat) else null,
+            chatName = chatName,
             senderName = result.senderName,
             text = MessageDecryptor.textOf(result.message),
             kind = MessageDecryptor.kindOf(result.message),
             timestampMillis = result.timestampMillis,
             fromMe = result.fromMe,
-            senderJid = result.sender.toString(),
-            chatJid = result.chat.toString(),
+            senderJid = senderJid,
+            chatJid = chatJid,
         )
     }
 
@@ -488,10 +578,14 @@ class WhatsAppManager(
             _state.update { st ->
                 st.copy(recent = st.recent.map { if (it.chatJid == chatJid) it.copy(chatName = subject) else it })
             }
+            scope.launch {
+                runCatching { conversationStore.updateChatName(chatJid, subject) }
+                    .onFailure { Log.w(config.logTag, "failed to persist group subject for $chatJid", it) }
+            }
         }
 
         override suspend fun onMessage(messages: List<MessageDecryptor.Result>) {
-            val received = messages.mapNotNull(::toReceived)
+            val received = messages.mapNotNull { toReceived(it) }
             if (received.isEmpty()) return
             _state.update { it.copy(recent = (received.asReversed() + it.recent).take(MAX_RECENT)) }
             deliveries.trySend(received)
@@ -504,6 +598,47 @@ class WhatsAppManager(
         const val DEFAULT_DEVICE_NAME = "Tether"
 
         private const val MAX_RECENT = 50
+
+        /**
+         * Re-assembles [messages] into the [Conversation]s they were already assigned to at
+         * ingestion (see [Received.conversationId], [ConversationTracker]), ordered by when each
+         * conversation started.
+         *
+         * This is a plain grouping, not a re-derivation of the 10-minute rule: that decision was
+         * already made correctly, once, per chat, when each message arrived — re-deriving it here
+         * against [messages] (which for [State.recent] merges every chat into one timeline) is
+         * exactly what used to let another chat's message wrongly split this chat's conversation.
+         */
+        fun groupIntoConversations(messages: List<Received>): List<Conversation> =
+            messages.groupBy { it.conversationId }
+                .values
+                .map { it.toConversation() }
+                .sortedBy { it.startTime }
+
+        private fun List<Received>.toConversation(): Conversation {
+            val sorted = sortedBy { it.timestampMillis }
+            val first = sorted.first()
+            val last = sorted.last()
+            val participants = sorted.map { it.senderJid }.distinct().map { jid ->
+                val sample = sorted.first { it.senderJid == jid }
+                Participant(
+                    jid = jid,
+                    phone = if (sample.fromMe) null else sample.phone,
+                    name = if (sample.fromMe) null else sample.senderName,
+                    isSelf = sample.fromMe,
+                )
+            }
+            return Conversation(
+                id = first.conversationId,
+                chatJid = first.chatJid,
+                chatType = first.chatType,
+                // The subject can arrive after the first message did; a later message in the same
+                // conversation may already carry it even if the first one doesn't.
+                chatName = last.chatName ?: first.chatName,
+                participants = participants,
+                messages = sorted,
+            )
+        }
 
         /** First retry delay; doubles per consecutive failure up to [RETRY_CAP_MS]. */
         private const val RETRY_BASE_MS = 1_000L
@@ -521,5 +656,67 @@ class WhatsAppManager(
         @Volatile private var active: WhatsAppManager? = null
 
         internal fun current(): WhatsAppManager? = active
+    }
+}
+
+/** A run of messages in the same chat separates into distinct conversations once the gap between two of them reaches this. */
+private const val CONVERSATION_TIMEOUT_MS = 10 * 60 * 1000L
+
+/**
+ * Assigns each incoming message to a [WhatsAppManager.Conversation], extending the chat's still
+ * -open one when the message lands within [CONVERSATION_TIMEOUT_MS] of it, starting a fresh one
+ * otherwise, and persisting the result via [store] — so the same decision is not made twice for
+ * the same message, and survives a process restart.
+ *
+ * Keeps a small in-memory record of each chat's most recently open conversation so a busy chat
+ * costs one DB read the first time it is seen this process, not one per message. A chat not seen
+ * yet this process falls back to [RoomConversationStore.latestForChat].
+ */
+private class ConversationTracker(private val store: RoomConversationStore) {
+    private data class Open(val id: String, val startTime: Long, var endTime: Long, val participants: MutableSet<String>)
+
+    private val open = java.util.concurrent.ConcurrentHashMap<String, Open>()
+
+    suspend fun resolve(
+        chatJid: String,
+        chatType: ChatType,
+        chatName: String?,
+        senderJid: String,
+        timestampMillis: Long,
+    ): String {
+        val existing = open[chatJid] ?: store.latestForChat(chatJid)?.let {
+            Open(it.id, it.startTime, it.endTime, it.participants.toMutableSet())
+        }
+
+        val conversation = if (existing != null && kotlin.math.abs(timestampMillis - existing.endTime) < CONVERSATION_TIMEOUT_MS) {
+            existing.apply {
+                endTime = maxOf(endTime, timestampMillis)
+                participants.add(senderJid)
+            }
+        } else {
+            Open(java.util.UUID.randomUUID().toString(), timestampMillis, timestampMillis, mutableSetOf(senderJid))
+        }
+        open[chatJid] = conversation
+
+        store.upsert(
+            id = conversation.id,
+            chatJid = chatJid,
+            chatType = chatType.name,
+            chatName = chatName,
+            startTime = conversation.startTime,
+            endTime = conversation.endTime,
+            participants = conversation.participants,
+        )
+        return conversation.id
+    }
+
+    /** Drops the in-memory record for [chatJid] — call once its persisted messages are cleared, so a stale id is never reused. */
+    fun forget(chatJid: String) {
+        open.remove(chatJid)
+    }
+
+    /** Drops every in-memory record — call once all persisted messages are cleared. */
+    fun forgetAll() {
+        open.clear()
     }
 }
