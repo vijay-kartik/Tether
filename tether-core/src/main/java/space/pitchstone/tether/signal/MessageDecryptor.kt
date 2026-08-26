@@ -151,24 +151,30 @@ internal class MessageDecryptor(
                 processProtocolParts(chat, sender, unwrapped)
 
                 val fromMe = raw.deviceSentMessage != null || isOwn(sender)
+                // Our own copies mirrored to another device are, at the XMPP layer, addressed to
+                // our own account: `from`/`chat` is us, not the peer, and `sender` is likewise us
+                // (there is no `participant` to say otherwise). The actual chat this belongs to is
+                // only recoverable from the `deviceSentMessage` envelope's `destinationJid` — the
+                // same place `recipientPhoneOf` already reads it from. Without this correction, our
+                // own sent messages and the peer's replies resolve to two different "chats" even
+                // though they are the same conversation.
+                val resolvedChat = raw.deviceSentMessage?.destinationJid?.let(Jid::parse) ?: chat
+                val resolvedChatType = if (resolvedChat === chat) chatType else ChatType.of(resolvedChat)
                 // `notify` is the sender's own display name, and the only place a name appears on
                 // an incoming message. Remember it — the server omits it often enough that reading
-                // it per message would make names flicker in and out.
-                //
-                // Only from a message someone else sent, though: our own copies from another device
-                // arrive with `from` set to the peer and no `participant`, so `sender` is the peer
-                // while any `notify` is ours. Recording that would file our name under their JID.
+                // it per message would make names flicker in and out. Never for our own messages,
+                // where any `notify` on the stanza is ours, not the peer's.
                 if (!fromMe) names.recordPushName(sender, messageNode.attr("notify"))
 
                 results += Result(
                     id = id,
                     sender = sender,
-                    chat = chat,
+                    chat = resolvedChat,
                     message = unwrapped,
                     encType = type,
                     fromMe = fromMe,
                     timestampMillis = timestamp,
-                    chatType = chatType,
+                    chatType = resolvedChatType,
                     senderName = if (fromMe) null else names.pushName(sender),
                     media = media?.first,
                     mediaRef = media?.second,

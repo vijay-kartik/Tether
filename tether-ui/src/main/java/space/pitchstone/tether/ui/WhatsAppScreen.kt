@@ -15,8 +15,10 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.material3.AlertDialog
@@ -41,6 +43,7 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -70,6 +73,7 @@ import java.time.format.DateTimeFormatter
 fun WhatsAppScreen(manager: WhatsAppManager, modifier: Modifier = Modifier, onSkip: (() -> Unit)? = null) {
     val state by manager.state.collectAsStateWithLifecycle()
     var confirmLogout by remember { mutableStateOf(false) }
+    var confirmClearMessages by remember { mutableStateOf(false) }
 
     // The server sends several refs at once; each is only valid for ~20s, so rotate through them
     // like whatsmeow does. Showing just the first means a slightly slow scan fails with no visible
@@ -102,6 +106,25 @@ fun WhatsAppScreen(manager: WhatsAppManager, modifier: Modifier = Modifier, onSk
         )
     }
 
+    if (confirmClearMessages) {
+        AlertDialog(
+            onDismissRequest = { confirmClearMessages = false },
+            title = { Text("Clear all conversations?") },
+            text = {
+                Text(
+                    "This will permanently delete all stored messages and conversations. " +
+                        "This action cannot be undone."
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = { confirmClearMessages = false; manager.clearAllMessages() }) {
+                    Text("Clear all", color = MaterialTheme.colorScheme.error)
+                }
+            },
+            dismissButton = { TextButton(onClick = { confirmClearMessages = false }) { Text("Cancel") } },
+        )
+    }
+
     if (linked) {
         LinkedAccount(
             modifier = modifier,
@@ -111,6 +134,7 @@ fun WhatsAppScreen(manager: WhatsAppManager, modifier: Modifier = Modifier, onSk
             connected = state.connected,
             onReconnect = manager::reconnect,
             onLogout = { confirmLogout = true },
+            onClearMessages = { confirmClearMessages = true },
             onDownload = manager::downloadMedia,
             onOpen = manager::openableMedia,
         )
@@ -129,6 +153,7 @@ private fun LinkedAccount(
     connected: Boolean,
     onReconnect: () -> Unit,
     onLogout: () -> Unit,
+    onClearMessages: () -> Unit,
     onDownload: suspend (String) -> ByteArray?,
     onOpen: suspend (String, MediaInfo) -> Uri?,
 ) {
@@ -146,6 +171,7 @@ private fun LinkedAccount(
                 }
             }
             if (!connected) TextButton(onClick = onReconnect) { Text("Reconnect") }
+            TextButton(onClick = onClearMessages) { Text("Clear") }
             TextButton(onClick = onLogout) { Text("Log out") }
         }
 
@@ -159,26 +185,28 @@ private fun LinkedAccount(
                 )
             }
         } else {
-            // Everything that is not one-to-one goes under Groups — a broadcast or a channel is
-            // not a personal chat, and each row names its own conversation, so nothing is
-            // mislabelled by sharing the section.
-            val (personal, groups) = recent.partition { it.chatType == ChatType.DIRECT }
+            // Re-assemble the conversations each message was already assigned to at ingestion.
+            val conversations = WhatsAppManager.groupIntoConversations(recent.reversed())
+            val (personalConversations, groupConversations) = conversations.partition {
+                it.chatType == ChatType.DIRECT
+            }
             LazyColumn(
                 modifier = Modifier.weight(1f),
                 verticalArrangement = Arrangement.spacedBy(8.dp),
             ) {
                 // A section with nothing in it would be a heading over blank space, so each
                 // appears only once it has something to show.
-                if (personal.isNotEmpty()) {
+                if (personalConversations.isNotEmpty()) {
                     item { SectionHeader("Personal") }
-                    // No `key`: one <message> node can produce several parts under the same id
-                    // (a group message carries its sender-key enc alongside the skmsg), and
-                    // duplicate keys are a hard error in LazyColumn.
-                    items(personal) { ReceivedRow(it, onDownload, onOpen) }
+                    items(personalConversations) { conversation ->
+                        ConversationGroup(conversation, onDownload, onOpen)
+                    }
                 }
-                if (groups.isNotEmpty()) {
+                if (groupConversations.isNotEmpty()) {
                     item { SectionHeader("Groups") }
-                    items(groups) { ReceivedRow(it, onDownload, onOpen) }
+                    items(groupConversations) { conversation ->
+                        ConversationGroup(conversation, onDownload, onOpen)
+                    }
                 }
             }
         }
@@ -196,12 +224,78 @@ private fun SectionHeader(title: String) {
 }
 
 /**
- * Messages we sent are shown for visibility only — offset and tinted like a chat bubble so they
- * read as ours at a glance.
+ * A conversation: a run of messages from the same chat with less than 10 minutes between
+ * consecutive ones. Rendered as a single card so the grouping is visible at a glance, with the
+ * chat name and time span shown once at the top rather than repeated on every message inside.
+ */
+@Composable
+private fun ConversationGroup(
+    conversation: WhatsAppManager.Conversation,
+    onDownload: suspend (String) -> ByteArray?,
+    onOpen: suspend (String, MediaInfo) -> Uri?,
+) {
+    Surface(
+        color = MaterialTheme.colorScheme.surfaceContainerLow,
+        shape = MaterialTheme.shapes.large,
+        modifier = Modifier.fillMaxWidth(),
+    ) {
+        Column(Modifier.padding(10.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween,
+            ) {
+                val chatLabel = conversationLabel(conversation)
+                if (chatLabel != null) {
+                    Text(
+                        chatLabel,
+                        style = MaterialTheme.typography.labelMedium,
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(1f, fill = false),
+                    )
+                } else {
+                    Spacer(Modifier.weight(1f))
+                }
+                Text(
+                    conversationTimeRange(conversation),
+                    style = MaterialTheme.typography.labelSmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            Spacer(Modifier.height(6.dp))
+
+            // Consecutive messages from the same side (same sender, us-or-them) read as one turn
+            // in the exchange, so only the first of a run repeats who is speaking.
+            conversation.messages.forEachIndexed { index, message ->
+                val previous = conversation.messages.getOrNull(index - 1)
+                val newSpeaker = previous == null || previous.senderJid != message.senderJid || previous.fromMe != message.fromMe
+                ReceivedRow(message, showSenderInfo = newSpeaker, onDownload = onDownload, onOpen = onOpen)
+                if (index != conversation.messages.lastIndex) Spacer(Modifier.height(4.dp))
+            }
+        }
+    }
+}
+
+/** "14:02" for a one-message conversation, "14:02–14:09" once it spans more than one. */
+private fun conversationTimeRange(conversation: WhatsAppManager.Conversation): String {
+    val start = clockTime(conversation.startTime)
+    val end = clockTime(conversation.endTime)
+    return if (start == end) start else "$start–$end"
+}
+
+/**
+ * One message's bubble, offset and tinted by [Received.fromMe] like a chat bubble so which side
+ * sent it reads at a glance.
+ *
+ * [showSenderInfo] is false for a message that continues the same speaker's previous turn inside
+ * a [ConversationGroup] — the name is not worth repeating, but the per-message time still is.
  */
 @Composable
 private fun ReceivedRow(
     message: WhatsAppManager.Received,
+    showSenderInfo: Boolean,
     onDownload: suspend (String) -> ByteArray?,
     onOpen: suspend (String, MediaInfo) -> Uri?,
 ) {
@@ -215,30 +309,29 @@ private fun ReceivedRow(
             shape = MaterialTheme.shapes.medium,
             modifier = Modifier.fillMaxWidth(0.9f),
         ) {
-            Column(Modifier.padding(12.dp)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.SpaceBetween,
-                ) {
+            Column(Modifier.padding(10.dp)) {
+                if (showSenderInfo) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                    ) {
+                        Text(
+                            senderLabel(message),
+                            style = MaterialTheme.typography.labelLarge,
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f),
+                        )
+                        Text(clockTime(message.timestampMillis), style = MaterialTheme.typography.labelSmall)
+                    }
+                } else {
+                    // Still worth knowing exactly when this one landed, even mid-turn.
                     Text(
-                        senderLabel(message),
-                        style = MaterialTheme.typography.labelLarge,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.weight(1f),
-                    )
-                    Text(clockTime(message.timestampMillis), style = MaterialTheme.typography.labelSmall)
-                }
-                // The section says personal-or-group; this says which group, since two sections
-                // cannot. A direct chat needs no second line: the sender *is* the chat.
-                conversationLabel(message)?.let { group ->
-                    Text(
-                        group,
+                        clockTime(message.timestampMillis),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                        modifier = Modifier.padding(top = 2.dp),
+                        modifier = Modifier.fillMaxWidth(),
+                        textAlign = TextAlign.End,
                     )
                 }
                 message.media?.let { media -> MediaBlock(message.id, media, onDownload, onOpen) }
@@ -250,7 +343,7 @@ private fun ReceivedRow(
                     Text(
                         it,
                         style = MaterialTheme.typography.bodyMedium,
-                        modifier = Modifier.padding(top = 4.dp),
+                        modifier = Modifier.padding(top = if (showSenderInfo) 4.dp else 0.dp),
                     )
                 }
                 message.annotation?.let { annotation ->
@@ -347,11 +440,11 @@ private fun senderLabel(message: WhatsAppManager.Received): String {
  * already say everything. Falls back to the group's id while its subject is still being fetched, so
  * a row is never left unattributed.
  */
-private fun conversationLabel(message: WhatsAppManager.Received): String? = when (message.chatType) {
-    ChatType.GROUP -> message.chatName ?: message.chatJid.substringBefore('@')
+private fun conversationLabel(conversation: WhatsAppManager.Conversation): String? = when (conversation.chatType) {
+    ChatType.GROUP -> conversation.chatName ?: conversation.chatJid.substringBefore('@')
     ChatType.BROADCAST -> "Status / broadcast"
-    ChatType.NEWSLETTER -> message.chatName ?: "Channel"
-    ChatType.OTHER -> message.chatJid.substringBefore('@')
+    ChatType.NEWSLETTER -> conversation.chatName ?: "Channel"
+    ChatType.OTHER -> conversation.chatJid.substringBefore('@')
     ChatType.DIRECT -> null
 }
 
